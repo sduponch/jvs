@@ -607,21 +607,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     assign jvs_data_ready = jvs_data_ready_init | jvs_data_ready_joy;
     
     //=========================================================================
-    // RS485 DIRECTION CONTROL
-    //=========================================================================
-    // Control RS485 transceiver direction based on current state
-    // High = Transmit mode, Low = Receive mode
-    // RS485 direction now controlled by jvs_com module
-
-    //=========================================================================
-    // RS485 STATE MACHINE
-    //=========================================================================
-    // Manages RS485 transceiver direction with proper setup and hold timing
-    // This is critical for reliable RS485 communication
-    
-    // RS485 timing and control moved to jvs_com module
-
-    //=========================================================================
     // MAIN STATE MACHINE - JVS PROTOCOL HANDLER
     //=========================================================================
     // Implements the complete JVS initialization sequence and input polling
@@ -698,12 +683,8 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     // Send first RESET command using sequential byte transmission
                     // JVS requires two reset commands for reliable initialization
                     if (com_tx_ready) begin
-                        // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Broadcast to all devices
-                            return_state <= STATE_FIRST_RESET;
-                        end
-                        
+                        com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Broadcast to all devices
+                        return_state <= STATE_FIRST_RESET;
                         // Select byte and signal based on position
                         case (cmd_pos)
                             3'd0: begin
@@ -748,12 +729,8 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 STATE_SECOND_RESET: begin
                     // Send second RESET command using sequential byte transmission (identical to first)
                     if (com_tx_ready) begin
-                        // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Broadcast to all devices
-                            return_state <= STATE_SECOND_RESET;
-                        end
-                        
+                        com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Broadcast to all devices
+                        return_state <= STATE_SECOND_RESET;
                         // Select byte and signal based on position
                         case (cmd_pos)
                             3'd0: begin
