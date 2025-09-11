@@ -25,8 +25,12 @@ jobs:
         wget -q https://downloads.intel.com/akdlm/software/acdsinst/24.1std/1077/qinst/qinst-lite-linux-24.1std-1077.run
         chmod +x qinst-lite-linux-24.1std-1077.run
         
-        # Install in unattended mode
-        ./qinst-lite-linux-24.1std-1077.run --mode unattended --installdir $HOME/quartus --accept_eula 1
+        # Extract and install
+        ./qinst-lite-linux-24.1std-1077.run --accept --quiet --nox11 --target $HOME/quartus_temp
+        
+        # Run the installer
+        cd $HOME/quartus_temp
+        ./qinst.sh --cli --installdir $HOME/quartus --download-dir /tmp --accept_eula
         
         # Add to PATH
         echo "$HOME/quartus/quartus/bin" >> $GITHUB_PATH
