@@ -13,6 +13,11 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        repository: RndMnkIII/JVS_Debugger
+        ref: jvs_submodule
+        path: JVS_Debugger
+        submodules: 'recursive'
     
     - name: Install dependencies
       run: |
@@ -36,46 +41,45 @@ jobs:
         ./qinst.sh --cli --download-dir /tmp --install-dir /opt/quartus --accept-eula
         
         # Find Quartus installation
-        find $HOME -name "quartus_sh" -type f 2>/dev/null || echo "quartus_sh not found"
+        find /opt -name "quartus_sh" -type f 2>/dev/null || echo "quartus_sh not found in /opt"
+        find $HOME -name "quartus_sh" -type f 2>/dev/null || echo "quartus_sh not found in HOME"
         
-        # Set PATH based on found installation
-        if [ -f "/opt/quartus/quartus/bin/quartus_sh" ]; then
-          echo "/opt/quartus/quartus/bin" >> $GITHUB_PATH
-        elif [ -f "$HOME/quartus_temp/intelFPGA_lite/24.1/quartus/bin/quartus_sh" ]; then
-          echo "$HOME/quartus_temp/intelFPGA_lite/24.1/quartus/bin" >> $GITHUB_PATH
-        fi
+        # Set environment variables for Quartus
+        echo "QUARTUS_ROOTDIR=/opt/quartus/quartus" >> $GITHUB_ENV
+        echo "PATH=/opt/quartus/quartus/linux64:/opt/quartus/quartus/bin:$PATH" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/opt/quartus/quartus/linux64:/opt/quartus/quartus/linux64/lib" >> $GITHUB_ENV
     
     - name: Compile JVS project
       run: |
-        # Find and verify Quartus installation
-        QUARTUS_PATH=$(find $HOME -name "quartus_sh" -type f 2>/dev/null | head -1)
-        if [ -z "$QUARTUS_PATH" ]; then
-          echo "❌ quartus_sh not found"
-          exit 1
-        fi
+        # Set up environment
+        export LD_LIBRARY_PATH="/opt/quartus/quartus/linux64:/opt/quartus/quartus/linux64/lib:$LD_LIBRARY_PATH"
+        export PATH="/opt/quartus/quartus/linux64:/opt/quartus/quartus/bin:$PATH"
         
-        echo "✅ Found quartus_sh at: $QUARTUS_PATH"
-        ls -la "$QUARTUS_PATH"
+        # Verify Quartus is working
+        echo "✅ Testing quartus_sh..."
+        quartus_sh --version || echo "Version check failed but continuing..."
         
         # Run compilation
-        "$QUARTUS_PATH" --flow compile jvs
+        echo "🚀 Starting compilation..."
+        cd JVS_Debugger/src/fpga
+        quartus_sh --flow compile JVS_Debugger
     
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: jvs-quartus-outputs
+        name: jvs-debugger-outputs
         path: |
-          output_files/
-          *.rpt
-          *.summary
+          JVS_Debugger/src/fpga/output_files/
+          JVS_Debugger/src/fpga/*.rpt
+          JVS_Debugger/src/fpga/*.summary
         retention-days: 30
     
     - name: Check compilation result
       run: |
-        if [ -f "output_files/jvs.rbf" ]; then
-          echo "✅ JVS compilation successful"
+        if [ -f "JVS_Debugger/src/fpga/output_files/JVS_Debugger.rbf" ]; then
+          echo "✅ JVS_Debugger compilation successful"
         else
-          echo "❌ JVS compilation failed"
+          echo "❌ JVS_Debugger compilation failed"
           exit 1
         fi
