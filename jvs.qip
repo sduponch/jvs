@@ -1,0 +1,14 @@
+# JVS Protocol Implementation QIP File
+# This file includes all SystemVerilog and Verilog files for JVS protocol support
+
+# JVS RTL Layer - Base definitions and packages
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/JVS_pkg.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/jvs_node_info_pkg.sv]
+
+# JVS Protocol Layer
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) jvs_controller.sv]
+
+# JVS Communication Layer
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) jvscom/jvs_com.sv]
+set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) jvscom/uart_rx.v]
+set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) jvscom/uart_tx.v]

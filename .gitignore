@@ -1,0 +1,62 @@
+# JVS Module Gitignore
+
+# Quartus files
+*.rpt
+*.summary
+*.flow.rpt
+*.map.rpt
+*.fit.rpt
+*.asm.rpt
+*.sta.rpt
+*.eda.rpt
+*.done
+*.jdi
+*.pin
+*.sof
+*.pof
+*.rbf
+*.tcl~
+*.bak
+
+# Quartus project files (keep .qpf and .qsf but ignore temp files)
+db/
+incremental_db/
+output_files/
+simulation/
+greybox_tmp/
+*.qws
+
+# ModelSim/Questa files
+work/
+transcript
+*.wlf
+*.vstf
+*.flock
+*.log
+
+# Vivado files
+*.jou
+*.str
+*.xpr
+*.cache/
+*.hw/
+*.ip_user_files/
+*.sim/
+*.runs/
+
+# Temporary files
+*~
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Generated files
+*.mif.bak
+*.hex.bak
