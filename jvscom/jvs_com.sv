@@ -154,7 +154,7 @@ module jvs_com
     //////////////////////////////////////////////////////////////////////
     
     uart_tx #(
-        .CLKS_PER_BIT(96) // Will be parameterized with uart_baud_div
+        .CLKS_PER_BIT(uart_baud_div) // UART baud rate divisor
     ) uart_tx_inst (
         .i_Clock(clk_sys),
         .i_Tx_DV(uart_tx_valid),
@@ -165,7 +165,7 @@ module jvs_com
     );
     
     uart_rx #(
-        .CLKS_PER_BIT(96) // Will be parameterized with uart_baud_div
+        .CLKS_PER_BIT(uart_baud_div) // UART baud rate divisor
     ) uart_rx_inst (
         .i_Clock(clk_sys),
         .i_Rx_Serial(uart_rx),

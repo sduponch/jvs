@@ -140,6 +140,53 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
   initial $warning("=== USE_DUMMY_JVS_DATA is NOT defined.  Using REAL data for JVS IO device ===");
 `endif
 
+    //=========================================================================
+    // JVS_COM INTERFACE SIGNALS (New modular interface)
+    //=========================================================================
+    // These signals will be used to communicate with the jvs_com module
+    
+    // TX interface signals
+    logic [7:0] com_tx_data;        // Data byte to transmit  
+    logic       com_tx_data_push;   // Pulse to push TX data
+    logic       com_tx_cmd_push;    // Pulse to push TX command (stores in FIFO)
+    logic [7:0] com_dst_node;       // Destination node address
+    logic       com_commit;         // Pulse to commit and transmit frame
+    logic       com_tx_ready;       // TX ready to accept data
+    
+    // RX interface signals
+    logic [7:0] com_rx_byte;        // Current data byte from RX
+    logic       com_rx_next;        // Pulse to get next RX byte
+    logic [7:0] com_rx_remaining;   // Bytes remaining (0 = current is last)
+    logic [7:0] com_src_node;       // Source node of response
+    logic [7:0] com_src_cmd;        // CMD from command FIFO
+    logic       com_src_cmd_next;   // Pulse to get next command from FIFO
+    logic [4:0] com_src_cmd_count;  // Number of commands available in FIFO
+    logic       com_rx_complete;    // Pulse when RX frame complete
+    logic       com_rx_error;       // RX checksum or format error
+
+    //=========================================================================
+    // COMMAND BUFFER SYSTEM - Sequential transmission with proper pulses
+    //=========================================================================
+    // Buffer to stack bytes and send them sequentially to jvs_com
+    typedef struct packed {
+        logic [7:0] data;      // Byte data
+        logic       is_cmd;    // 1=command byte, 0=data byte
+    } cmd_buffer_entry_t;
+    
+    localparam CMD_BUFFER_SIZE = 32;
+    cmd_buffer_entry_t cmd_buffer [0:CMD_BUFFER_SIZE-1];
+    logic [4:0] cmd_buffer_write_ptr;   // Write pointer (5-bit for overflow detection)
+    logic [4:0] cmd_buffer_read_ptr;    // Read pointer
+    logic [4:0] cmd_buffer_count;       // Number of entries in buffer
+    logic       cmd_buffer_sending;     // Currently sending buffered commands
+    logic [7:0] cmd_buffer_dst_node;    // Destination node for current buffer
+    
+    // Helper signals for buffer operations
+    logic       buffer_push_cmd;        // Pulse to push command byte
+    logic       buffer_push_data;       // Pulse to push data byte  
+    logic [7:0] buffer_push_byte;       // Byte to push
+    logic       buffer_commit;          // Pulse to start sending buffer
+    logic       buffer_ready;           // Buffer ready to accept new data
 
     //=========================================================================
     // UART TIMING CONFIGURATION
@@ -179,7 +226,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
         .uart_rx(i_uart_rx),
         .uart_tx(o_uart_tx),
         .uart_rts_n(rs485_rts_n),    // RS485 direction control (active-low)
-        .uart_baud_div(16'd0),       // Not used with fixed baud rate
+        .uart_baud_div(UART_CLKS_PER_BIT),       // UART clock divisor for 115200 baud
         
         // TX Interface
         .tx_data(com_tx_data),
@@ -464,7 +511,8 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     localparam STATE_SEND_FINALIZE = 5'h1A; // Finalize frame and transmit
     localparam STATE_FIRST_RESET_ARG = 5'h1B; // Push reset argument and commit
     localparam STATE_SECOND_RESET_ARG = 5'h1C; // Push second reset argument and commit  
-    localparam STATE_WAIT_TX_COMPLETE = 5'h1D; // Wait for TX completion
+    localparam STATE_TX_NEXT = 5'h1D; // Generic state for pulse handling and counter increment
+    localparam STATE_WAIT_TX_COMPLETE = 5'h1E; // Wait for TX completion
     
     // RS485 State Machine - Controls transceiver direction with proper timing
     localparam RS485_RECEIVE = 2'b00;         // Receive mode (default)
@@ -501,6 +549,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     //=========================================================================
     // Current state for main protocol state machine
     logic [4:0] main_state;        // Main protocol state
+    
+    // TX state management for sequential byte transmission
+    logic [4:0] return_state;      // State to return to after TX_NEXT
+    logic [2:0] cmd_pos;           // Position in current command sequence
     
     // Timing and protocol control
     logic [31:0] delay_counter;    // Multi-purpose delay counter
@@ -599,6 +651,13 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     always @(posedge i_clk) begin
 
         jvs_data_ready_init <= 1'b0;
+        
+        // Default: Clear all jvs_com control signals (they are pulses)
+        com_tx_data_push <= 1'b0;
+        com_tx_cmd_push <= 1'b0;
+        com_commit <= 1'b0;
+        com_rx_next <= 1'b0;
+        com_src_cmd_next <= 1'b0;
 
         if (i_rst || !i_ena) begin
             // Initialize all state variables on reset
@@ -608,6 +667,19 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             poll_timer <= 32'h0;
             current_device_addr <= 8'h01;    // Standard JVS device address
             last_tx_state <= 5'h0;
+            
+            // Initialize TX state management
+            return_state <= 5'h0;
+            cmd_pos <= 3'h0;
+            
+            // Initialize jvs_com control signals 
+            com_tx_data <= 8'h00;
+            com_tx_data_push <= 1'b0;
+            com_tx_cmd_push <= 1'b0;
+            com_dst_node <= 8'h00;
+            com_commit <= 1'b0;
+            com_rx_next <= 1'b0;
+            com_src_cmd_next <= 1'b0;
         end else begin
             case (main_state)
                 //-------------------------------------------------------------
@@ -645,25 +717,35 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // FIRST RESET COMMAND - Begin JVS device initialization
                 //-------------------------------------------------------------
                 STATE_FIRST_RESET: begin
-                    // Send first RESET command using new jvs_com interface
+                    // Send first RESET command using sequential byte transmission
                     // JVS requires two reset commands for reliable initialization
                     if (com_tx_ready) begin
-                        // Set destination node
-                        com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Broadcast to all devices
+                        // Initialize command parameters on first entry
+                        if (cmd_pos == 0) begin
+                            com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Broadcast to all devices
+                            return_state <= STATE_FIRST_RESET;
+                        end
                         
-                        // Push command and argument sequentially
-                        com_tx_data <= CMD_RESET;        // Reset command (0xF0)
-                        com_tx_cmd_push <= 1'b1;         // Push as command
-                        
-                        com_tx_data <= CMD_RESET_ARG;    // Reset argument (0xD9)
-                        com_tx_data_push <= 1'b1;        // Push as data
-                        
-                        // Commit and transmit frame
-                        com_commit <= 1'b1;
-                        
-                        // Transition to delay state
-                        main_state <= STATE_FIRST_RESET_DELAY;
-                        last_tx_state <= STATE_FIRST_RESET; // Remember command for response handling
+                        // Select byte and signal based on position
+                        case (cmd_pos)
+                            3'd0: begin
+                                com_tx_data <= CMD_RESET;     // Reset command (0xF0)
+                                com_tx_cmd_push <= 1'b1;     // Push as command
+                                main_state <= STATE_TX_NEXT; // Go to TX_NEXT
+                            end
+                            3'd1: begin
+                                com_tx_data <= CMD_RESET_ARG; // Reset argument (0xD9)
+                                com_tx_data_push <= 1'b1;    // Push as data  
+                                main_state <= STATE_TX_NEXT; // Go to TX_NEXT
+                            end
+                            default: begin
+                                // All bytes sent, commit and transition
+                                com_commit <= 1'b1;
+                                cmd_pos <= 3'd0;
+                                main_state <= STATE_FIRST_RESET_DELAY;
+                                last_tx_state <= STATE_FIRST_RESET;
+                            end
+                        endcase
                     end
                 end
 
@@ -686,24 +768,34 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // SECOND RESET COMMAND - Ensure complete device reset
                 //-------------------------------------------------------------
                 STATE_SECOND_RESET: begin
-                    // Send second RESET command (identical to first)
+                    // Send second RESET command using sequential byte transmission (identical to first)
                     if (com_tx_ready) begin
-                        // Set destination node
-                        com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Broadcast to all devices
+                        // Initialize command parameters on first entry
+                        if (cmd_pos == 0) begin
+                            com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Broadcast to all devices
+                            return_state <= STATE_SECOND_RESET;
+                        end
                         
-                        // Push command and argument sequentially
-                        com_tx_data <= CMD_RESET;        // Reset command (0xF0)
-                        com_tx_cmd_push <= 1'b1;         // Push as command
-                        
-                        com_tx_data <= CMD_RESET_ARG;    // Reset argument (0xD9)
-                        com_tx_data_push <= 1'b1;        // Push as data
-                        
-                        // Commit and transmit frame
-                        com_commit <= 1'b1;
-                        
-                        // Transition to delay state
-                        main_state <= STATE_SECOND_RESET_DELAY;
-                        last_tx_state <= STATE_SECOND_RESET;
+                        // Select byte and signal based on position
+                        case (cmd_pos)
+                            3'd0: begin
+                                com_tx_data <= CMD_RESET;     // Reset command (0xF0)
+                                com_tx_cmd_push <= 1'b1;     // Push as command
+                                main_state <= STATE_TX_NEXT; // Go to TX_NEXT
+                            end
+                            3'd1: begin
+                                com_tx_data <= CMD_RESET_ARG; // Reset argument (0xD9)
+                                com_tx_data_push <= 1'b1;    // Push as data  
+                                main_state <= STATE_TX_NEXT; // Go to TX_NEXT
+                            end
+                            default: begin
+                                // All bytes sent, commit and transition
+                                com_commit <= 1'b1;
+                                cmd_pos <= 3'd0;
+                                main_state <= STATE_SECOND_RESET_DELAY;
+                                last_tx_state <= STATE_SECOND_RESET;
+                            end
+                        endcase
                     end
                 end
 
@@ -726,25 +818,35 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // SET ADDRESS COMMAND - Assign unique address to device
                 //-------------------------------------------------------------
                 STATE_SEND_SETADDR: begin
-                    // Send SET ADDRESS command using new jvs_com interface
+                    // Send SET ADDRESS command using sequential byte transmission
                     // This assigns a unique address (0x01) to the JVS device
                     if (com_tx_ready) begin
-                        // Set destination node
-                        com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Still broadcast for address assignment
+                        // Initialize command parameters on first entry
+                        if (cmd_pos == 0) begin
+                            com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Still broadcast for address assignment
+                            return_state <= STATE_SEND_SETADDR;
+                        end
                         
-                        // Push command and address sequentially
-                        com_tx_data <= CMD_SETADDR;         // Set address command (0xF1)
-                        com_tx_cmd_push <= 1'b1;            // Push as command
-                        
-                        com_tx_data <= current_device_addr; // 01 - Address to assign
-                        com_tx_data_push <= 1'b1;           // Push as data
-                        
-                        // Commit and transmit frame
-                        com_commit <= 1'b1;
-                        
-                        // Wait for response
-                        main_state <= STATE_WAIT_RX;
-                        last_tx_state <= STATE_SEND_SETADDR;
+                        // Select byte and signal based on position
+                        case (cmd_pos)
+                            3'd0: begin
+                                com_tx_data <= CMD_SETADDR;         // Set address command (0xF1)
+                                com_tx_cmd_push <= 1'b1;            // Push as command
+                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
+                            end
+                            3'd1: begin
+                                com_tx_data <= current_device_addr; // 01 - Address to assign
+                                com_tx_data_push <= 1'b1;           // Push as data
+                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
+                            end
+                            default: begin
+                                // All bytes sent, commit and transition
+                                com_commit <= 1'b1;
+                                cmd_pos <= 3'd0;
+                                main_state <= STATE_WAIT_RX;
+                                last_tx_state <= STATE_SEND_SETADDR;
+                            end
+                        endcase
                     end
                 end
 
@@ -752,22 +854,30 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // READ ID COMMAND - Request device identification
                 //-------------------------------------------------------------
                 STATE_SEND_READID: begin
-                    // Send READ ID command using new jvs_com interface
+                    // Send READ ID command using sequential byte transmission
                     // This requests the device to send its identification string
                     if (com_tx_ready) begin
-                        // Set destination node
-                        com_dst_node <= current_device_addr; // 01 - Address specific device
+                        // Initialize command parameters on first entry
+                        if (cmd_pos == 0) begin
+                            com_dst_node <= current_device_addr; // 01 - Address specific device
+                            return_state <= STATE_SEND_READID;
+                        end
                         
-                        // Push command (no arguments for this command)
-                        com_tx_data <= CMD_IOIDENT;          // IO identity command (0x10)
-                        com_tx_cmd_push <= 1'b1;             // Push as command
-                        
-                        // Commit and transmit frame
-                        com_commit <= 1'b1;
-                        
-                        // Wait for response
-                        main_state <= STATE_WAIT_RX;
-                        last_tx_state <= STATE_SEND_READID;
+                        // Select byte and signal based on position
+                        case (cmd_pos)
+                            3'd0: begin
+                                com_tx_data <= CMD_IOIDENT;          // IO identity command (0x10)
+                                com_tx_cmd_push <= 1'b1;             // Push as command
+                                main_state <= STATE_TX_NEXT;         // Go to TX_NEXT
+                            end
+                            default: begin
+                                // All bytes sent, commit and transition
+                                com_commit <= 1'b1;
+                                cmd_pos <= 3'd0;
+                                main_state <= STATE_WAIT_RX;
+                                last_tx_state <= STATE_SEND_READID;
+                            end
+                        endcase
                     end
                 end
 
@@ -775,21 +885,29 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // COMMAND REVISION REQUEST - Get command format revision
                 //-------------------------------------------------------------
                 STATE_SEND_CMDREV: begin
-                    // Send CMDREV command using new jvs_com interface
+                    // Send CMDREV command using sequential byte transmission
                     if (com_tx_ready) begin
-                        // Set destination node
-                        com_dst_node <= current_device_addr; // 01
+                        // Initialize command parameters on first entry
+                        if (cmd_pos == 0) begin
+                            com_dst_node <= current_device_addr; // 01
+                            return_state <= STATE_SEND_CMDREV;
+                        end
                         
-                        // Push command (no arguments)
-                        com_tx_data <= CMD_CMDREV;          // Command revision command (0x11)
-                        com_tx_cmd_push <= 1'b1;            // Push as command
-                        
-                        // Commit and transmit frame
-                        com_commit <= 1'b1;
-                        
-                        // Wait for response
-                        main_state <= STATE_WAIT_RX;
-                        last_tx_state <= STATE_SEND_CMDREV;
+                        // Select byte and signal based on position
+                        case (cmd_pos)
+                            3'd0: begin
+                                com_tx_data <= CMD_CMDREV;          // Command revision command (0x11)
+                                com_tx_cmd_push <= 1'b1;            // Push as command
+                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
+                            end
+                            default: begin
+                                // All bytes sent, commit and transition
+                                com_commit <= 1'b1;
+                                cmd_pos <= 3'd0;
+                                main_state <= STATE_WAIT_RX;
+                                last_tx_state <= STATE_SEND_CMDREV;
+                            end
+                        endcase
                     end
                 end
 
@@ -797,21 +915,29 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // JVS REVISION REQUEST - Get JVS protocol revision
                 //-------------------------------------------------------------
                 STATE_SEND_JVSREV: begin
-                    // Send JVSREV command using new jvs_com interface
+                    // Send JVSREV command using sequential byte transmission
                     if (com_tx_ready) begin
-                        // Set destination node
-                        com_dst_node <= current_device_addr; // 01
+                        // Initialize command parameters on first entry
+                        if (cmd_pos == 0) begin
+                            com_dst_node <= current_device_addr; // 01
+                            return_state <= STATE_SEND_JVSREV;
+                        end
                         
-                        // Push command (no arguments)
-                        com_tx_data <= CMD_JVSREV;          // JVS revision command (0x12)
-                        com_tx_cmd_push <= 1'b1;            // Push as command
-                        
-                        // Commit and transmit frame
-                        com_commit <= 1'b1;
-                        
-                        // Wait for response
-                        main_state <= STATE_WAIT_RX;
-                        last_tx_state <= STATE_SEND_JVSREV;
+                        // Select byte and signal based on position
+                        case (cmd_pos)
+                            3'd0: begin
+                                com_tx_data <= CMD_JVSREV;          // JVS revision command (0x12)
+                                com_tx_cmd_push <= 1'b1;            // Push as command
+                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
+                            end
+                            default: begin
+                                // All bytes sent, commit and transition
+                                com_commit <= 1'b1;
+                                cmd_pos <= 3'd0;
+                                main_state <= STATE_WAIT_RX;
+                                last_tx_state <= STATE_SEND_JVSREV;
+                            end
+                        endcase
                     end
                 end
 
@@ -819,21 +945,29 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // COMMUNICATIONS VERSION REQUEST - Get communication version
                 //-------------------------------------------------------------
                 STATE_SEND_COMMVER: begin
-                    // Send COMMVER command using new jvs_com interface
+                    // Send COMMVER command using sequential byte transmission
                     if (com_tx_ready) begin
-                        // Set destination node
-                        com_dst_node <= current_device_addr; // 01
+                        // Initialize command parameters on first entry
+                        if (cmd_pos == 0) begin
+                            com_dst_node <= current_device_addr; // 01
+                            return_state <= STATE_SEND_COMMVER;
+                        end
                         
-                        // Push command (no arguments)
-                        com_tx_data <= CMD_COMMVER;         // Communication version command (0x13)
-                        com_tx_cmd_push <= 1'b1;            // Push as command
-                        
-                        // Commit and transmit frame
-                        com_commit <= 1'b1;
-                        
-                        // Wait for response
-                        main_state <= STATE_WAIT_RX;
-                        last_tx_state <= STATE_SEND_COMMVER;
+                        // Select byte and signal based on position
+                        case (cmd_pos)
+                            3'd0: begin
+                                com_tx_data <= CMD_COMMVER;         // Communication version command (0x13)
+                                com_tx_cmd_push <= 1'b1;            // Push as command
+                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
+                            end
+                            default: begin
+                                // All bytes sent, commit and transition
+                                com_commit <= 1'b1;
+                                cmd_pos <= 3'd0;
+                                main_state <= STATE_WAIT_RX;
+                                last_tx_state <= STATE_SEND_COMMVER;
+                            end
+                        endcase
                     end
                 end
 
@@ -841,21 +975,29 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // FEATURE CHECK REQUEST - Get device capabilities
                 //-------------------------------------------------------------
                 STATE_SEND_FEATCHK: begin
-                    // Send FEATCHK command using new jvs_com interface
+                    // Send FEATCHK command using sequential byte transmission
                     if (com_tx_ready) begin
-                        // Set destination node
-                        com_dst_node <= current_device_addr; // 01
+                        // Initialize command parameters on first entry
+                        if (cmd_pos == 0) begin
+                            com_dst_node <= current_device_addr; // 01
+                            return_state <= STATE_SEND_FEATCHK;
+                        end
                         
-                        // Push command (no arguments)
-                        com_tx_data <= CMD_FEATCHK;         // Feature check command (0x14)
-                        com_tx_cmd_push <= 1'b1;            // Push as command
-                        
-                        // Commit and transmit frame
-                        com_commit <= 1'b1;
-                        
-                        // Wait for response
-                        main_state <= STATE_WAIT_RX;
-                        last_tx_state <= STATE_SEND_FEATCHK;
+                        // Select byte and signal based on position
+                        case (cmd_pos)
+                            3'd0: begin
+                                com_tx_data <= CMD_FEATCHK;         // Feature check command (0x14)
+                                com_tx_cmd_push <= 1'b1;            // Push as command
+                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
+                            end
+                            default: begin
+                                // All bytes sent, commit and transition
+                                com_commit <= 1'b1;
+                                cmd_pos <= 3'd0;
+                                main_state <= STATE_WAIT_RX;
+                                last_tx_state <= STATE_SEND_FEATCHK;
+                            end
+                        endcase
                     end
                 end
 
@@ -1030,6 +1172,21 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     // Wait for response
                     main_state <= STATE_WAIT_RX;
                     last_tx_state <= STATE_SEND_INPUTS;
+                end
+
+                //-------------------------------------------------------------
+                // GENERIC TX NEXT STATE - Handles pulse cleanup and position increment
+                //-------------------------------------------------------------
+                STATE_TX_NEXT: begin
+                    // Reset all push signals to 0 (they were set to 1 in calling state)
+                    com_tx_cmd_push <= 1'b0;
+                    com_tx_data_push <= 1'b0;
+                    
+                    // Increment position
+                    cmd_pos <= cmd_pos + 1;
+                    
+                    // Return to calling state
+                    main_state <= return_state;
                 end
                 
                 default: main_state <= STATE_IDLE;
