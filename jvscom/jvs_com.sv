@@ -63,13 +63,6 @@ module jvs_com
     output reg [7:0]    checksum_errors_count // Checksum error counter
 );
 
-    //=========================================================================
-    // UART TIMING CONFIGURATION
-    //=========================================================================
-    // Calculate UART clock divider for 115200 baud rate
-    // Formula: UART_CLKS_PER_BIT = System_Clock_Frequency / Baud_Rate
-    localparam UART_CLKS_PER_BIT = MASTER_CLK_FREQ / 115200;
-
     // RS485 Timing Constants (in clock cycles at 48MHz)
     localparam RS485_SETUP_CYCLES = 480;   // 10μs at 48MHz
     localparam RS485_HOLD_CYCLES  = 1440;  // 30μs at 48MHz
