@@ -131,6 +131,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     input logic [6:0] node_name_rd_addr
 ); 
 
+    localparam UART_CLKS_PER_BIT = MASTER_CLK_FREQ / 115200;
 //==================================================================================
 // Show in Quartus Synthesis if dummy data is used for simulation without JVS device
 //==================================================================================
@@ -193,7 +194,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     //=========================================================================
     
     // Instantiate JVS communication module
-    jvs_com #(.JVS_BUFFER_SIZE(256)) jvs_com_inst (
+    jvs_com #(
+        .UART_CLKS_PER_BIT(UART_CLKS_PER_BIT),
+        .JVS_BUFFER_SIZE(256)
+    ) jvs_com_inst (
         .clk_sys(i_clk),
         .reset(i_rst),
         

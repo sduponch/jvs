@@ -23,6 +23,7 @@
 
 module jvs_com
 #(
+    parameter UART_CLKS_PER_BIT,
     parameter JVS_BUFFER_SIZE = 256  // Maximum JVS frame data size
 )
 (
