@@ -32,15 +32,15 @@ jobs:
         cd $HOME/quartus_temp
         ./qinst.sh --help || true
         
-        # Try different installation approach
-        ./qinst.sh --cli || ./qinst.sh
+        # Install with proper parameters
+        ./qinst.sh --cli --download-dir /tmp --install-dir /opt/quartus --accept-eula
         
         # Find Quartus installation
         find $HOME -name "quartus_sh" -type f 2>/dev/null || echo "quartus_sh not found"
         
         # Set PATH based on found installation
-        if [ -f "$HOME/quartus_temp/quartus/bin/quartus_sh" ]; then
-          echo "$HOME/quartus_temp/quartus/bin" >> $GITHUB_PATH
+        if [ -f "/opt/quartus/quartus/bin/quartus_sh" ]; then
+          echo "/opt/quartus/quartus/bin" >> $GITHUB_PATH
         elif [ -f "$HOME/quartus_temp/intelFPGA_lite/24.1/quartus/bin/quartus_sh" ]; then
           echo "$HOME/quartus_temp/intelFPGA_lite/24.1/quartus/bin" >> $GITHUB_PATH
         fi
