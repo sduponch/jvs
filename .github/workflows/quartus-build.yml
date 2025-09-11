@@ -24,39 +24,59 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libc6-i386 lib32z1 lib32ncurses6 libbz2-1.0 libxext6 libxft2 libxi6 libxtst6
     
+    - name: Cache Quartus installation
+      uses: actions/cache@v4
+      id: quartus-cache
+      with:
+        path: |
+          ~/quartus
+          ~/downloadtmp
+        key: quartus-lite-24.1std-1077-${{ runner.os }}-cyclonev
+        restore-keys: |
+          quartus-lite-24.1std-1077-${{ runner.os }}-
+    
     - name: Install Quartus Prime Lite
+      if: steps.quartus-cache.outputs.cache-hit != 'true'
       run: |
+        echo "⬇️ Cache miss - Installing Quartus Prime Lite..."
+        
         # Download and install Quartus Lite
         wget -q https://downloads.intel.com/akdlm/software/acdsinst/24.1std/1077/qinst/qinst-lite-linux-24.1std-1077.run
         chmod +x qinst-lite-linux-24.1std-1077.run
         
         # Extract and install automatically
-        ./qinst-lite-linux-24.1std-1077.run --accept --quiet --nox11 --target $HOME/quartus_temp
+        ./qinst-lite-linux-24.1std-1077.run --accept --quiet --nox11 --target $HOME/quartus_temp -- --cli --download-dir ~/downloadtmp --install-dir ~/quartus --accept-eula --components quartus,cyclonev
         
-        # Run the installer with help to see options
-        cd $HOME/quartus_temp
-        ./qinst.sh --help || true
-        
-        # Install with proper parameters
-        ./qinst.sh --cli --download-dir /tmp --install-dir /opt/quartus --accept-eula
+        # Installation should be done automatically by the extractor above
+        echo "Installation completed by extractor"
+    
+    - name: Setup Quartus environment
+      run: |
+        if [ "${{ steps.quartus-cache.outputs.cache-hit }}" == "true" ]; then
+          echo "✅ Cache hit - Using cached Quartus installation"
+        fi
         
         # Find Quartus installation
-        find /opt -name "quartus_sh" -type f 2>/dev/null || echo "quartus_sh not found in /opt"
+        find ~/quartus -name "quartus_sh" -type f 2>/dev/null || echo "quartus_sh not found in ~/quartus"
         find $HOME -name "quartus_sh" -type f 2>/dev/null || echo "quartus_sh not found in HOME"
         
         # Set environment variables for Quartus
-        echo "QUARTUS_ROOTDIR=/opt/quartus/quartus" >> $GITHUB_ENV
-        echo "PATH=/opt/quartus/quartus/linux64:/opt/quartus/quartus/bin:$PATH" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=/opt/quartus/quartus/linux64:/opt/quartus/quartus/linux64/lib" >> $GITHUB_ENV
+        echo "QUARTUS_ROOTDIR=$HOME/quartus/quartus" >> $GITHUB_ENV
+        echo "PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$PATH" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib" >> $GITHUB_ENV
     
     - name: Compile JVS project
       run: |
         # Set up environment
-        export LD_LIBRARY_PATH="/opt/quartus/quartus/linux64:/opt/quartus/quartus/linux64/lib:$LD_LIBRARY_PATH"
-        export PATH="/opt/quartus/quartus/linux64:/opt/quartus/quartus/bin:$PATH"
+        export LD_LIBRARY_PATH="$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib:$LD_LIBRARY_PATH"
+        export PATH="$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$PATH"
+        export QUARTUS_ROOTDIR="$HOME/quartus/quartus"
         
         # Verify Quartus is working
         echo "✅ Testing quartus_sh..."
+        echo "PATH: $PATH"
+        echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
+        ldd $HOME/quartus/quartus/linux64/quartus_sh | grep "not found" || echo "All libraries found"
         quartus_sh --version || echo "Version check failed but continuing..."
         
         # Run compilation
@@ -64,13 +84,54 @@ jobs:
         cd JVS_Debugger/src/fpga
         quartus_sh --flow compile JVS_Debugger
     
+    - name: Create RBF_R for Analog Pocket
+      run: |
+        cd JVS_Debugger/src/fpga
+        if [ -f "output_files/JVS_Debugger.rbf" ]; then
+          echo "🔄 Creating RBF_R (bit-reversed RBF) for Analog Pocket..."
+          
+          # Create bit-reversed RBF for Analog Pocket
+          printf 'import sys\ndef reverse_byte_bits(b):\n    r = 0\n    for i in range(8):\n        if b & (1 << i):\n            r |= (1 << (7 - i))\n    return r\nwith open("output_files/JVS_Debugger.rbf", "rb") as inf, open("output_files/jvs_debugger.rbf_r", "wb") as outf:\n    while True:\n        byte = inf.read(1)\n        if not byte:\n            break\n        outf.write(bytes([reverse_byte_bits(byte[0])]))' > reverse_rbf.py
+          python3 reverse_rbf.py
+          
+          echo "✅ RBF_R file created: $(wc -c < output_files/jvs_debugger.rbf_r) bytes"
+        else
+          echo "❌ No RBF file found to process"
+          exit 1
+        fi
+    
+    - name: Package Analog Pocket Core
+      run: |
+        cd JVS_Debugger
+        echo "📦 Creating Analog Pocket core package..."
+        
+        # Create the core directory structure
+        mkdir -p package/Cores/RndMnkIII.JVS_Debugger
+        
+        # Copy dist folder if it exists
+        if [ -d "dist" ]; then
+          echo "📁 Copying dist folder..."
+          cp -r dist/* package/
+        else
+          echo "⚠️ No dist folder found, creating basic structure"
+          mkdir -p package/Cores/RndMnkIII.JVS_Debugger
+        fi
+        
+        # Copy the RBF_R file to the core directory
+        echo "📄 Copying jvs_debugger.rbf_r to core directory..."
+        cp src/fpga/output_files/jvs_debugger.rbf_r package/Cores/RndMnkIII.JVS_Debugger/
+        
+        echo "✅ Package structure created:"
+        find package -type f | head -20
+    
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       if: always()
       with:
         name: jvs-debugger-outputs
         path: |
-          JVS_Debugger/src/fpga/output_files/
+          JVS_Debugger/package/
+          JVS_Debugger/src/fpga/output_files/JVS_Debugger.rbf
           JVS_Debugger/src/fpga/*.rpt
           JVS_Debugger/src/fpga/*.summary
         retention-days: 30
