@@ -620,7 +620,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
         com_tx_cmd_push <= 1'b0;
         com_commit <= 1'b0;
         com_rx_next <= 1'b0;
-        com_src_cmd_next <= 1'b0;
 
         if (i_rst || !i_ena) begin
             // Initialize all state variables on reset
@@ -642,7 +641,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             com_dst_node <= 8'h00;
             com_commit <= 1'b0;
             com_rx_next <= 1'b0;
-            com_src_cmd_next <= 1'b0;
         end else begin
             case (main_state)
                 //-------------------------------------------------------------
@@ -1155,12 +1153,12 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     // Handles byte-by-byte reception of JVS frames with checksum validation
     
     always @(posedge i_clk) begin
-
+        com_src_cmd_next <= 1'b0;
     //initial content for simulation without JVS device
     `ifdef USE_DUMMY_JVS_DATA
         jvs_nodes_r2 <= JVS_INFO_INIT;
     `endif
-    
+
         jvs_data_ready_joy <= 1'b0;
 
         if (i_rst || !i_ena) begin
@@ -1201,8 +1199,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             p2_joy_state <= 32'h80808080;
             p3_btn_state <= 16'h0000;
             p4_btn_state <= 16'h0000;
-            
-
             
         end else begin
             // RX frame processing managed by jvs_com module
