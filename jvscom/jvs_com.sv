@@ -147,7 +147,6 @@ module jvs_com
     reg [7:0]   tx_frame_length;
     reg [7:0]   tx_frame_data [0:JVS_BUFFER_SIZE-1];
     reg [7:0]   tx_frame_cmd;        // First byte (CMD) for RX echo
-    reg [7:0]   tx_data_count;       // Count of pushed bytes
     
     //////////////////////////////////////////////////////////////////////
     // Generate block for API buffer to frame data copying
