@@ -1,8 +1,34 @@
 # JVS Protocol Implementation
 
+[![Build Status](https://github.com/sduponch/jvs/actions/workflows/quartus-build.yml/badge.svg)](https://github.com/sduponch/jvs/actions/workflows/quartus-build.yml)
+[![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-Live-brightgreen)](https://sduponch.github.io/jvs/)
+
 ⚠️ **ALPHA STATUS - PARTIAL COMMAND IMPLEMENTATION** ⚠️
 
+> **🌐 [Latest Build Available](https://sduponch.github.io/jvs/)** - Automatic builds with FPGA statistics and direct downloads!
+
 This repository contains a JVS (JAMMA Video Standard) Master controller implementation for FPGA platforms, designed for connecting JVS arcade cabinets through RS485 communication.
+
+## 🚧 Work In Progress - Getting Latest Build
+
+### 🌍 Public Downloads (No GitHub Account Required)
+
+**📥 [Download Latest Build](https://sduponch.github.io/jvs/)** - Direct download, always up-to-date!
+
+### Alternative (GitHub Account Required)
+**📥 [GitHub Actions](https://github.com/sduponch/jvs/actions/workflows/quartus-build.yml?query=branch%3Amain+is%3Asuccess)** - Download `jvs-debugger-outputs` artifact
+
+### Installation Steps:
+1. **Download** the latest build from the link above
+2. **Extract** all files from the ZIP/folder
+3. **Copy** the `Cores/` folder to your Analog Pocket SD card root
+4. **Enjoy** - The core will appear in `Cores/RndMnkIII.JVS_Debugger/`
+
+### What You Get:
+- ✅ **Ready-to-use Analog Pocket core** in correct folder structure
+- ✅ **Bit-reversed RBF file** (`jvs_debug.rbf_r`) for Analog Pocket compatibility
+- ✅ **Complete package** with metadata and assets from `dist/` folder
+- ✅ **Build info** with commit details and file listing
 
 ## Overview
 
