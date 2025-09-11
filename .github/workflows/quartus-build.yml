@@ -1,0 +1,60 @@
+name: JVS Submodule Quartus Compilation
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  quartus-build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libc6-i386 lib32z1 lib32ncurses5 lib32bz2-1.0 libxext6 libxft2 libxi6 libxtst6
+    
+    - name: Install Quartus Prime Lite
+      run: |
+        # Download and install Quartus Lite
+        wget -q https://downloads.intel.com/akdlm/software/acdsinst/24.1std/1077/qinst/qinst-lite-linux-24.1std-1077.run
+        chmod +x qinst-lite-linux-24.1std-1077.run
+        
+        # Install in unattended mode
+        ./qinst-lite-linux-24.1std-1077.run --mode unattended --installdir $HOME/quartus --accept_eula 1
+        
+        # Add to PATH
+        echo "$HOME/quartus/quartus/bin" >> $GITHUB_PATH
+    
+    - name: Compile JVS project
+      run: |
+        # Verify Quartus installation
+        ls -la $HOME/quartus/quartus/bin/quartus_sh
+        
+        # Run compilation
+        $HOME/quartus/quartus/bin/quartus_sh --flow compile jvs
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: jvs-quartus-outputs
+        path: |
+          output_files/
+          *.rpt
+          *.summary
+        retention-days: 30
+    
+    - name: Check compilation result
+      run: |
+        if [ -f "output_files/jvs.rbf" ]; then
+          echo "✅ JVS compilation successful"
+        else
+          echo "❌ JVS compilation failed"
+          exit 1
+        fi
