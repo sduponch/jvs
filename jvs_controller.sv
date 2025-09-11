@@ -187,14 +187,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     logic [7:0] buffer_push_byte;       // Byte to push
     logic       buffer_commit;          // Pulse to start sending buffer
     logic       buffer_ready;           // Buffer ready to accept new data
-
-    //=========================================================================
-    // UART TIMING CONFIGURATION
-    //=========================================================================
-    // Calculate UART clock divider for 115200 baud rate
-    // Formula: UART_CLKS_PER_BIT = System_Clock_Frequency / Baud_Rate
-    localparam UART_CLKS_PER_BIT = MASTER_CLK_FREQ / 115200;
-    
+   
     //=========================================================================
     // JVS COMMUNICATION MODULE INSTANCE
     //=========================================================================
@@ -208,7 +201,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
         .uart_rx(i_uart_rx),
         .uart_tx(o_uart_tx),
         .uart_rts_n(rs485_rts_n),    // RS485 direction control (active-low)
-        .uart_baud_div(UART_CLKS_PER_BIT),       // UART clock divisor for 115200 baud
         
         // TX Interface
         .tx_data(com_tx_data),

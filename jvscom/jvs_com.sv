@@ -20,6 +20,7 @@
 // Incompatible: "No Brand;NAOMI Converter98701;ver2.0" (frames are ignored)
 //////////////////////////////////////////////////////////////////////
 
+
 module jvs_com
 #(
     parameter JVS_BUFFER_SIZE = 256  // Maximum JVS frame data size
@@ -33,9 +34,6 @@ module jvs_com
     input  wire         uart_rx,
     output wire         uart_tx,
     output wire         uart_rts_n,    // RS485 transmit enable (active low)
-    
-    // Configuration
-    input  wire [15:0]  uart_baud_div, // UART baud rate divisor
     
     // High-level Protocol Interface - TX Path
     input  wire [7:0]   tx_data,       // Data byte (CMD + args)
@@ -64,10 +62,13 @@ module jvs_com
     output reg [7:0]    checksum_errors_count // Checksum error counter
 );
 
-    //////////////////////////////////////////////////////////////////////
-    // Local Parameters
-    //////////////////////////////////////////////////////////////////////
-    
+    //=========================================================================
+    // UART TIMING CONFIGURATION
+    //=========================================================================
+    // Calculate UART clock divider for 115200 baud rate
+    // Formula: UART_CLKS_PER_BIT = System_Clock_Frequency / Baud_Rate
+    localparam UART_CLKS_PER_BIT = MASTER_CLK_FREQ / 115200;
+
     // RS485 Timing Constants (in clock cycles at 48MHz)
     localparam RS485_SETUP_CYCLES = 480;   // 10μs at 48MHz
     localparam RS485_HOLD_CYCLES  = 1440;  // 30μs at 48MHz
@@ -174,7 +175,7 @@ module jvs_com
     //////////////////////////////////////////////////////////////////////
     
     uart_tx #(
-        .CLKS_PER_BIT(uart_baud_div) // UART baud rate divisor
+        .CLKS_PER_BIT(UART_CLKS_PER_BIT) // UART baud rate divisor
     ) uart_tx_inst (
         .i_Clock(clk_sys),
         .i_Tx_DV(uart_tx_valid),
@@ -185,7 +186,7 @@ module jvs_com
     );
     
     uart_rx #(
-        .CLKS_PER_BIT(uart_baud_div) // UART baud rate divisor
+        .CLKS_PER_BIT(UART_CLKS_PER_BIT) // UART baud rate divisor
     ) uart_rx_inst (
         .i_Clock(clk_sys),
         .i_Rx_Serial(uart_rx),
