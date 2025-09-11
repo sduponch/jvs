@@ -118,11 +118,11 @@ module jvs_com
     reg         tx_escape_pending;
     reg [7:0]   tx_escape_byte;
     
-    // API Buffer Management
-    reg [7:0]   api_buffer [0:255];     // Buffer for pushed data
-    reg [7:0]   api_buffer_count;       // Number of bytes in buffer
-    reg [7:0]   api_dst_node_latched;   // Latched destination node
-    reg         api_commit_pending;     // Commit pending processing
+    // TX Data Buffer Management
+    reg [7:0]   tx_data_buffer [0:255]; // Buffer for pushed data
+    reg [7:0]   tx_data_count;          // Number of bytes in buffer
+    reg [7:0]   tx_dst_node_latched;    // Latched destination node
+    reg         tx_commit_pending;      // Commit pending processing
     
     // Command FIFO for multi-command frame tracking
     reg [7:0]   cmd_fifo [0:15];        // FIFO to store commands (up to 16 commands per frame)
@@ -149,6 +149,27 @@ module jvs_com
     reg [7:0]   tx_frame_cmd;        // First byte (CMD) for RX echo
     reg [7:0]   tx_data_count;       // Count of pushed bytes
     
+    //////////////////////////////////////////////////////////////////////
+    // Generate block for API buffer to frame data copying
+    //////////////////////////////////////////////////////////////////////
+    
+    genvar i;
+    generate
+        for (i = 0; i < JVS_BUFFER_SIZE; i++) begin : gen_buffer_copy
+            always @(posedge clk_sys) begin
+                if (reset) begin
+                    tx_frame_data[i] <= 8'h00;
+                end else if (tx_commit_pending && tx_state == TX_IDLE) begin
+                    if (i < tx_data_count) begin
+                        tx_frame_data[i] <= tx_data_buffer[i];
+                    end else begin
+                        tx_frame_data[i] <= 8'h00;  // Clear unused bytes
+                    end
+                end
+            end
+        end
+    endgenerate
+
     //////////////////////////////////////////////////////////////////////
     // UART Instance
     //////////////////////////////////////////////////////////////////////
@@ -211,13 +232,13 @@ module jvs_com
     assign uart_tx_data = uart_tx_byte;
     
     //////////////////////////////////////////////////////////////////////
-    // API Buffer Management
+    // TX Data Buffer Management
     //////////////////////////////////////////////////////////////////////
     
     always @(posedge clk_sys) begin
         if (reset) begin
-            api_buffer_count <= 0;
-            api_commit_pending <= 1'b0;
+            tx_data_count <= 0;
+            tx_commit_pending <= 1'b0;
             tx_ready <= 1'b1;
             
             // Initialize command FIFO
@@ -227,11 +248,11 @@ module jvs_com
         end else begin
             // Handle data and command push
             if ((tx_data_push || tx_cmd_push) && tx_ready) begin
-                api_buffer[api_buffer_count] <= tx_data;
-                api_buffer_count <= api_buffer_count + 1;
+                tx_data_buffer[tx_data_count] <= tx_data;
+                tx_data_count <= tx_data_count + 1;
                 
                 // Store first CMD for backward compatibility
-                if (api_buffer_count == 0) begin
+                if (tx_data_count == 0) begin
                     tx_frame_cmd <= tx_data;
                 end
             end
@@ -245,15 +266,15 @@ module jvs_com
             
             // Handle commit
             if (commit && tx_ready) begin
-                api_dst_node_latched <= dst_node;
-                api_commit_pending <= 1'b1;
+                tx_dst_node_latched <= dst_node;
+                tx_commit_pending <= 1'b1;
                 tx_ready <= 1'b0;
             end
             
             // Reset after processing
-            if (api_commit_pending && tx_state == TX_IDLE) begin
-                api_commit_pending <= 1'b0;
-                api_buffer_count <= 0;
+            if (tx_commit_pending && tx_state == TX_IDLE) begin
+                tx_commit_pending <= 1'b0;
+                tx_data_count <= 0;
                 tx_ready <= 1'b1;
             end
             
@@ -297,16 +318,10 @@ module jvs_com
             case (tx_state)
                 TX_IDLE: begin
                     rs485_tx_enable <= 1'b0;
-                    if (api_commit_pending) begin
-                        // Prepare frame from API buffer
-                        tx_frame_node <= api_dst_node_latched;
-                        tx_frame_length <= api_buffer_count;
-                        for (int i = 0; i < 256; i++) begin
-                            if (i < api_buffer_count)
-                                tx_frame_data[i] <= api_buffer[i];
-                            else
-                                tx_frame_data[i] <= 8'h00;
-                        end
+                    if (tx_commit_pending) begin
+                        // Prepare frame from TX data buffer
+                        tx_frame_node <= tx_dst_node_latched;
+                        tx_frame_length <= tx_data_count;
                         
                         tx_timer <= 0;
                         tx_state <= TX_SETUP;

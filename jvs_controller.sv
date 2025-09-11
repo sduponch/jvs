@@ -198,24 +198,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     //=========================================================================
     // JVS COMMUNICATION MODULE INSTANCE
     //=========================================================================
-    // Control signals for JVS communication
-    logic [7:0] com_tx_data;        // TX data byte to push
-    logic       com_tx_data_push;   // Pulse to push TX data
-    logic       com_tx_cmd_push;    // NEW: Pulse to push TX command (stores in FIFO)
-    logic [7:0] com_dst_node;       // Destination node address
-    logic       com_commit;         // Pulse to commit and transmit frame
-    logic       com_tx_ready;       // TX ready to accept data
-    
-    // RX interface signals
-    logic [7:0] com_rx_byte;        // Current RX data byte
-    logic       com_rx_next;        // Pulse to get next RX byte
-    logic [7:0] com_rx_remaining;   // Bytes remaining in RX frame
-    logic [7:0] com_src_node;       // Source node of response
-    logic [7:0] com_src_cmd;        // CMD from command FIFO
-    logic       com_src_cmd_next;   // NEW: Pulse to get next command from FIFO
-    logic [4:0] com_src_cmd_count;  // NEW: Number of commands in FIFO
-    logic       com_rx_complete;    // Pulse when RX frame complete
-    logic       com_rx_error;       // RX checksum or format error
     
     // Instantiate JVS communication module
     jvs_com #(.JVS_BUFFER_SIZE(256)) jvs_com_inst (
