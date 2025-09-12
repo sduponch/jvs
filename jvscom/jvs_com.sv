@@ -67,6 +67,9 @@ module jvs_com
     localparam RS485_SETUP_CYCLES = 480;   // 10μs at 48MHz
     localparam RS485_HOLD_CYCLES  = 1440;  // 30μs at 48MHz
     
+    // JVS Protocol Constants
+    localparam JVS_CHECKSUM_SIZE = 1;      // Checksum is 1 byte
+    
     // TX State Machine
     localparam [3:0] TX_IDLE        = 4'h0;
     localparam [3:0] TX_SETUP       = 4'h1;
@@ -143,6 +146,11 @@ module jvs_com
     reg [7:0]   tx_frame_data [0:JVS_BUFFER_SIZE-1];
     reg [7:0]   tx_frame_cmd;        // First byte (CMD) for RX echo
     
+    // Edge detection registers for TX control signals
+    reg tx_cmd_push_d, tx_data_push_d;
+    wire tx_cmd_push_negedge = tx_cmd_push_d & ~tx_cmd_push;
+    wire tx_data_push_negedge = tx_data_push_d & ~tx_data_push;
+    
     //////////////////////////////////////////////////////////////////////
     // Generate block for API buffer to frame data copying
     //////////////////////////////////////////////////////////////////////
@@ -153,7 +161,7 @@ module jvs_com
             always @(posedge clk_sys) begin
                 if (reset) begin
                     tx_frame_data[i] <= 8'h00;
-                end else if (tx_commit_pending && tx_state == TX_IDLE) begin
+                end else if (tx_commit_pending && tx_state == TX_SETUP) begin
                     if (i < tx_data_count) begin
                         tx_frame_data[i] <= tx_data_buffer[i];
                     end else begin
@@ -231,46 +239,22 @@ module jvs_com
     
     always @(posedge clk_sys) begin
         if (reset) begin
-            tx_data_count <= 0;
-            tx_commit_pending <= 1'b0;
-            tx_ready <= 1'b1;
             
             // Initialize command FIFO
             cmd_write_ptr <= 0;
             cmd_read_ptr <= 0;
             cmd_count <= 0;
         end else begin
-            // Handle data and command push
-            if ((tx_data_push || tx_cmd_push) && tx_ready) begin
-                tx_data_buffer[tx_data_count] <= tx_data;
-                tx_data_count <= tx_data_count + 1;
-                
-                // Store first CMD for backward compatibility
-                if (tx_data_count == 0) begin
-                    tx_frame_cmd <= tx_data;
-                end
-            end
+            // Handle data and command push - all managed in TX state machine
             
-            // Handle command push - store in FIFO
-            if (tx_cmd_push && tx_ready && cmd_count < 16) begin
+            // Handle command push - store in FIFO on negedge for better timing
+            if (tx_cmd_push_negedge && tx_ready && cmd_count < 16) begin
                 cmd_fifo[cmd_write_ptr] <= tx_data;
                 cmd_write_ptr <= cmd_write_ptr + 1;
                 cmd_count <= cmd_count + 1;
             end
             
-            // Handle commit
-            if (commit && tx_ready) begin
-                tx_dst_node_latched <= dst_node;
-                tx_commit_pending <= 1'b1;
-                tx_ready <= 1'b0;
-            end
-            
-            // Reset after processing
-            if (tx_commit_pending && tx_state == TX_IDLE) begin
-                tx_commit_pending <= 1'b0;
-                tx_data_count <= 0;
-                tx_ready <= 1'b1;
-            end
+            // Handle commit - moved to TX state machine
             
             // Handle command FIFO initialization from RX
             if (cmd_fifo_init && cmd_count > 0) begin
@@ -305,17 +289,42 @@ module jvs_com
             tx_escape_pending <= 1'b0;
             frames_tx_count <= 0;
             tx_state_debug <= TX_IDLE;
+            tx_data_count <= 0;
+            tx_ready <= 1'b1;
+            tx_commit_pending <= 1'b0;
+            tx_cmd_push_d <= 1'b0;
+            tx_data_push_d <= 1'b0;
         end else begin
             tx_state_debug <= tx_state;
             uart_tx_start <= 1'b0; // Default, pulse when needed
             
+            // Update edge detection registers
+            tx_cmd_push_d <= tx_cmd_push;
+            tx_data_push_d <= tx_data_push;
+            
             case (tx_state)
                 TX_IDLE: begin
                     rs485_tx_enable <= 1'b0;
+                    // Handle data and command push on negedge for better timing
+                    if ((tx_data_push_negedge || tx_cmd_push_negedge) && tx_ready) begin
+                        tx_data_buffer[tx_data_count] <= tx_data;
+                        tx_data_count <= tx_data_count + 1;
+                        
+                        // Store first CMD for backward compatibility
+                        if (tx_data_count == 0) begin
+                            tx_frame_cmd <= tx_data;
+                        end
+                    end
+                    // Handle commit request
+                    if (commit && tx_ready) begin
+                        tx_dst_node_latched <= dst_node;
+                        tx_commit_pending <= 1'b1;
+                        tx_ready <= 1'b0;
+                    end
                     if (tx_commit_pending) begin
                         // Prepare frame from TX data buffer
                         tx_frame_node <= tx_dst_node_latched;
-                        tx_frame_length <= tx_data_count;
+                        tx_frame_length <= tx_data_count + JVS_CHECKSUM_SIZE;
                         
                         tx_timer <= 0;
                         tx_state <= TX_SETUP;
@@ -450,6 +459,10 @@ module jvs_com
                     end else begin
                         rs485_tx_enable <= 1'b0;
                         frames_tx_count <= frames_tx_count + 1;
+                        // Reset transmission state
+                        tx_commit_pending <= 1'b0;
+                        tx_data_count <= 0;
+                        tx_ready <= 1'b1;
                         tx_state <= TX_IDLE;
                     end
                 end
