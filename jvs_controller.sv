@@ -2,87 +2,36 @@
 // JVS Controller Module for Analogizer - ALPHA VERSION
 // Partial JVS Master implementation optimized for gaming performance
 // 
-// ⚠️  ALPHA STATUS - PARTIAL COMMAND IMPLEMENTATION ⚠️
+// ⚠️  ALPHA STATUS - INCOMPLETE PROTOCOL IMPLEMENTATION ⚠️
 //
-// This module implements a JVS (JAMMA Video Standard) Master controller
-// that allows connecting JVS arcade cabinets to the Analogue Pocket 
-// through the Analogizer.
+// This module implements a simplified JVS (JAMMA Video Standard) Master 
+// controller that allows connecting JVS arcade cabinets to the Analogue 
+// Pocket through the Analogizer. 
 //
-// IMPLEMENTATION STATUS (ALPHA ~30-40% complete):
-// Based on JVS Specification v3.0 (25 pages, 49 commands total)
+// CURRENT STATUS:
+// - Core protocol working (Reset, Address assignment, Input polling)
+// - Basic button mapping functional (D-PAD, face buttons, START/SELECT)
+// - JVS escape sequence support implemented (D0 DF → E0, D0 CF → D0)
+// - Optimized for gaming performance (1ms polling, minimal latency)
+// - FPGA resource usage optimized with configurable buffer sizes
+// - Protocol implementation incomplete (missing capabilities, device info)
+// - Button positions may need verification/adjustment
+// - Single device support only
 //
-// ✅ FULLY IMPLEMENTED (8/49 commands):
-//    - Reset (F0) - Double reset sequence with timing delays
-//    - Set Address (F1) - Single device addressing
-//    - IO Identity (10) - Device name string reading (up to 100 chars)
-//    - Command Revision (11) - Format revision detection (BCD)
-//    - JVS Revision (12) - Protocol version detection (BCD) 
-//    - Communications Version (13) - Communication system version
-//    - Feature Check (14) - Complete capability parsing with all function codes
-//    - Switch Inputs (20) - Digital buttons (2 players, 13 buttons each)
-//    - Analog Inputs (22) - Multi-channel 16-bit analog data
-//    - Generic Output 1 (32) - Digital GPIO control (3-byte format)
-//    - JVS escape sequences (D0 DF → E0, D0 CF → D0)
-//    - RS485 timing control with setup/hold delays
-//
-// 🟡 PARTIALLY IMPLEMENTED (4/49 commands):
-//    - Coin Inputs (21) - Command sent, status parsed but coin data ignored
-//    - Screen Position Inputs (25) - Basic X/Y coordinates (16-bit each)
-//    - Keycode Inputs (24) - Command sent, response skipped
-//    - Misc Switch Inputs (26) - Command sent, response skipped
-//
-// ❌ NOT IMPLEMENTED (37/49 commands):
-//    - Main ID (15) - Send main board identification to device
-//    - Rotary Inputs (23) - Rotary encoder data (parsed but ignored)
-//    - Remaining Payout (2E) - Medal hopper status and count
-//    - Data Retransmit (2F) - Checksum error recovery
-//    - Coin management: COINDEC (30), COININC (35), PAYINC (31), PAYDEC (36)
-//    - Advanced outputs: OUTPUT2 (37), OUTPUT3 (38), ANLOUT (33), CHAROUT (34)
-//    - Communication changes: COMMCHG (F2)
-//    - Manufacturer-specific commands (Taito TypeX, Namco, CyberLead LED)
-//    - Multi-device addressing (supports single device only)
-//    - Dynamic baud rate changes
-//    - Error recovery mechanisms
-//
-// PLANNED RESTRUCTURING:
-// This monolithic module will be split into:
-//   - jvs_com: Communication layer (UART, framing, escape sequences)
-//   - jvs_controller: Protocol layer (commands, parsing, state machines)
-//   - SNAC interface abstraction: Review interaction with SNAC module for
-//     better abstraction and future portability to MiSTer platform
-//
-// ARCHITECTURE (Current):
+// ARCHITECTURE:
 // - RS485 State Machine: Manages transceiver direction and timing
 // - Main State Machine: Handles JVS protocol sequence and commands  
-// - RX State Machine: Processes incoming JVS responses with full parsing
-// - Two-buffer system: Raw buffer + processed buffer for unescaped data
-// - Node information management for device capabilities
-//
-// PROTOCOL COMPLIANCE:
-// - Physical Layer: RS-485 at 115200 baud (8N1) ✅
-// - Link Layer: SYNC(0xE0) + NODE + LENGTH + DATA + CHECKSUM ✅  
-// - Escape sequences: D0 DF → E0, D0 CF → D0 ✅
-// - Address assignment: Master=0x00, Slaves=0x01-0x1F ✅
-// - Initialization: Double reset + sequential addressing ✅
-// - Multi-device chaining: Infrastructure present but single device only
+// - RX State Machine: Processes incoming JVS responses with escape sequence decoding
+// - Two-buffer system: Raw buffer for incoming data, processed buffer for unescaped data
 //
 // HARDWARE REQUIREMENTS:
 // - External MAX485 or equivalent RS485 transceiver
-// - Proper 120Ω termination for reliable communication  
-// - JVS-compatible arcade cabinet
-// - SENSE line connection for proper device chaining (unused in single mode)
+// - Proper 120Ω termination for reliable communication
+// - JVS-compatible arcade cabinet (tested with Namco Noir)
 //
-// I/O BOARD COMPATIBILITY:
-// ✅ WORKING:
-//    - NAJV2 (Tekken 7) - Full compatibility
-//    - NAJV (Time Crisis 4) - Full compatibility  
-//    - TAITO CORP Ver2.0 (Viewlix) - Full compatibility
-// ❌ NOT WORKING:
-//    - "No Brand;NAOMI Converter98701;ver2.0" - Frames ignored
-//
-// Author: Totaly FuRy - Sebastien DUPONCHEEL (sduponch on GitHub)
+// Author: DUPONCHEEL Sébastien (sduponch on GitHub)
 // Project: Analogizer JVS Controller
-// Status: Alpha - Partial Implementation
+// Status: Alpha - Work in Progress
 // Date: 2025
 //////////////////////////////////////////////////////////////////////
 //Use: set_global_assignment -name VERILOG_MACRO "USE_DUMMY_JVS_DATA=1" 
@@ -131,7 +80,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     input logic [6:0] node_name_rd_addr
 ); 
 
-    localparam UART_CLKS_PER_BIT = MASTER_CLK_FREQ / 115200;
 //==================================================================================
 // Show in Quartus Synthesis if dummy data is used for simulation without JVS device
 //==================================================================================
@@ -141,101 +89,47 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
   initial $warning("=== USE_DUMMY_JVS_DATA is NOT defined.  Using REAL data for JVS IO device ===");
 `endif
 
-    //=========================================================================
-    // JVS_COM INTERFACE SIGNALS (New modular interface)
-    //=========================================================================
-    // These signals will be used to communicate with the jvs_com module
-    
-    // TX interface signals
-    logic [7:0] com_tx_data;        // Data byte to transmit  
-    logic       com_tx_data_push;   // Pulse to push TX data
-    logic       com_tx_cmd_push;    // Pulse to push TX command (stores in FIFO)
-    logic [7:0] com_dst_node;       // Destination node address
-    logic       com_commit;         // Pulse to commit and transmit frame
-    logic       com_tx_ready;       // TX ready to accept data
-    
-    // RX interface signals
-    logic [7:0] com_rx_byte;        // Current data byte from RX
-    logic       com_rx_next;        // Pulse to get next RX byte
-    logic [7:0] com_rx_remaining;   // Bytes remaining (0 = current is last)
-    logic [7:0] com_src_node;       // Source node of response
-    logic [7:0] com_src_cmd;        // CMD from command FIFO
-    logic       com_src_cmd_next;   // Pulse to get next command from FIFO
-    logic [4:0] com_src_cmd_count;  // Number of commands available in FIFO
-    logic       com_rx_complete;    // Pulse when RX frame complete
-    logic       com_rx_error;       // RX checksum or format error
 
     //=========================================================================
-    // COMMAND BUFFER SYSTEM - Sequential transmission with proper pulses
+    // UART TIMING CONFIGURATION
     //=========================================================================
-    // Buffer to stack bytes and send them sequentially to jvs_com
-    typedef struct packed {
-        logic [7:0] data;      // Byte data
-        logic       is_cmd;    // 1=command byte, 0=data byte
-    } cmd_buffer_entry_t;
+    // Calculate UART clock divider for 115200 baud rate
+    // Formula: UART_CLKS_PER_BIT = System_Clock_Frequency / Baud_Rate
+    localparam UART_CLKS_PER_BIT = MASTER_CLK_FREQ / 115200;
     
-    localparam CMD_BUFFER_SIZE = 32;
-    cmd_buffer_entry_t cmd_buffer [0:CMD_BUFFER_SIZE-1];
-    logic [4:0] cmd_buffer_write_ptr;   // Write pointer (5-bit for overflow detection)
-    logic [4:0] cmd_buffer_read_ptr;    // Read pointer
-    logic [4:0] cmd_buffer_count;       // Number of entries in buffer
-    logic       cmd_buffer_sending;     // Currently sending buffered commands
-    logic [7:0] cmd_buffer_dst_node;    // Destination node for current buffer
-    
-    // Helper signals for buffer operations
-    logic       buffer_push_cmd;        // Pulse to push command byte
-    logic       buffer_push_data;       // Pulse to push data byte  
-    logic [7:0] buffer_push_byte;       // Byte to push
-    logic       buffer_commit;          // Pulse to start sending buffer
-    logic       buffer_ready;           // Buffer ready to accept new data
-   
     //=========================================================================
-    // JVS COMMUNICATION MODULE INSTANCE
+    // UART TRANSMITTER INSTANCE
     //=========================================================================
+    // Control signals for UART transmitter
+    logic uart_tx_dv;              // Data valid strobe to start transmission
+    logic [7:0] uart_tx_byte;      // Byte to transmit
+    logic uart_tx_active;         // High when transmission is in progress
+    logic uart_tx_done;           // Pulse when transmission completes
     
-    // Instantiate JVS communication module
-    jvs_com #(
-        .UART_CLKS_PER_BIT(UART_CLKS_PER_BIT),
-        .JVS_BUFFER_SIZE(256)
-    ) jvs_com_inst (
-        .clk_sys(i_clk),
-        .reset(i_rst),
-        
-        // UART Physical Interface
-        .uart_rx(i_uart_rx),
-        .uart_tx(o_uart_tx),
-        .uart_rts_n(rs485_rts_n),    // RS485 direction control (active-low)
-        
-        // TX Interface
-        .tx_data(com_tx_data),
-        .tx_data_push(com_tx_data_push),
-        .tx_cmd_push(com_tx_cmd_push),
-        .dst_node(com_dst_node),
-        .commit(com_commit),
-        .tx_ready(com_tx_ready),
-        
-        // RX Interface
-        .rx_byte(com_rx_byte),
-        .rx_next(com_rx_next),
-        .rx_remaining(com_rx_remaining),
-        .src_node(com_src_node),
-        .src_cmd(com_src_cmd),
-        .src_cmd_next(com_src_cmd_next),
-        .src_cmd_count(com_src_cmd_count),
-        .rx_complete(com_rx_complete),
-        .rx_error(com_rx_error),
-        
-        // Debug/Status Interface (unused for now)
-        .tx_state_debug(),              // Unconnected
-        .rx_state_debug(),              // Unconnected
-        .frames_tx_count(),             // Unconnected
-        .frames_rx_count(),             // Unconnected
-        .checksum_errors_count()        // Unconnected
+    // Instantiate UART transmitter module
+    uart_tx #(.CLKS_PER_BIT(UART_CLKS_PER_BIT)) uart_tx_inst (
+        .i_Clock(i_clk),
+        .i_Tx_DV(uart_tx_dv),
+        .i_Tx_Byte(uart_tx_byte),
+        .o_Tx_Active(uart_tx_active),
+        .o_Tx_Serial(o_uart_tx),
+        .o_Tx_Done(uart_tx_done)
     );
     
-    // Convert RS485 direction signal (jvs_com uses active-low RTS)
-    wire rs485_rts_n;
-    assign o_rx485_dir = ~rs485_rts_n;  // Convert active-low RTS to active-high DIR
+    //=========================================================================
+    // UART RECEIVER INSTANCE
+    //=========================================================================
+    // Status signals from UART receiver
+    wire uart_rx_dv;             // Data valid pulse when byte is received
+    wire [7:0] uart_rx_byte;     // Received byte data
+    
+    // Instantiate UART receiver module
+    uart_rx #(.CLKS_PER_BIT(UART_CLKS_PER_BIT)) uart_rx_inst (
+        .i_Clock(i_clk),
+        .i_Rx_Serial(i_uart_rx),
+        .o_Rx_DV(uart_rx_dv),
+        .o_Rx_Byte(uart_rx_byte)
+    );
 
     //=========================================================================
     // JVS PROTOCOL CONSTANTS
@@ -474,7 +368,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     localparam STATE_SEND_COMMVER = 4'hA;     // Send communications version request
     localparam STATE_SEND_FEATCHK = 4'hB;     // Send feature check request
     localparam STATE_SEND_INPUTS = 4'hC;      // Send input state request (start progressive build)
-    // TX states removed - jvs_com module now handles all transmission
+    localparam STATE_WAIT_TX_SETUP = 4'hD;    // Wait for RS485 setup time
+    localparam STATE_TRANSMIT_BYTE = 4'hE;    // Transmit data bytes
+    localparam STATE_WAIT_TX_DONE = 4'hF;     // Wait for transmission completion
+    localparam STATE_WAIT_TX_HOLD = 5'h10;    // Wait for RS485 hold time
     localparam STATE_WAIT_RX = 5'h11;         // Wait for device response
     
     // INPUT BUILDING SUB-STATES - Progressive frame construction
@@ -487,10 +384,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     localparam STATE_SEND_INPUTS_MISC = 5'h18;     // Add misc inputs if available
     localparam STATE_SEND_OUTPUT_DIGITAL = 5'h19; // Send output digital command for GPIO
     localparam STATE_SEND_FINALIZE = 5'h1A; // Finalize frame and transmit
-    localparam STATE_FIRST_RESET_ARG = 5'h1B; // Push reset argument and commit
-    localparam STATE_SECOND_RESET_ARG = 5'h1C; // Push second reset argument and commit  
-    localparam STATE_TX_NEXT = 5'h1D; // Generic state for pulse handling and counter increment
-    localparam STATE_WAIT_TX_COMPLETE = 5'h1E; // Wait for TX completion
     
     // RS485 State Machine - Controls transceiver direction with proper timing
     localparam RS485_RECEIVE = 2'b00;         // Receive mode (default)
@@ -525,18 +418,42 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     //=========================================================================
     // STATE VARIABLES AND CONTROL REGISTERS
     //=========================================================================
-    // Current state for main protocol state machine
+    // Current state for each state machine
     logic [4:0] main_state;        // Main protocol state
+    logic [1:0] rs485_state;       // RS485 transceiver state
+    logic [4:0] rx_state;          // Receive frame processing state (5-bit to support new parsing states)
     
-    // TX state management for sequential byte transmission
-    logic [4:0] return_state;      // State to return to after TX_NEXT
-    logic [2:0] cmd_pos;           // Position in current command sequence
+    // Transmission buffer and control
+    logic [7:0] tx_buffer [0:TX_BUFFER_SIZE-1];  // Buffer for outgoing JVS frames
+    logic [7:0] tx_length;         // Total length of current transmission
+    logic [7:0] tx_counter;        // Current byte position in transmission
+    logic [7:0] tx_checksum;       // Running checksum calculation
+    logic rs485_tx_request;        // Signal to start RS485 transmission
     
+    // Reception buffer and control
+    logic [7:0] rx_buffer_raw [0:RX_BUFFER_SIZE-1]; // Buffer for raw incoming JVS frames with escape sequences
+    logic [7:0] rx_buffer [0:RX_BUFFER_SIZE-1]; // Buffer for unescaped JVS frames (final processed data)
+    logic [7:0] rx_length;         // Length of current incoming frame
+    logic [7:0] rx_counter;        // Current byte position in reception
+    logic [7:0] rx_checksum;       // Running checksum verification
+    // Generic copy variables (used for unescape and name copying)
+    logic [7:0] copy_read_idx;      // Read index for copy operations
+    
+    // Single player analog concatenation registers (24-bit each for MSB+LSB)
+    logic [23:0] p1_analog_x_24bit; // X axis: Ch1(MSB 12-bit) + Ch3(LSB 12-bit)
+    logic [23:0] p1_analog_y_24bit; // Y axis: Ch2(MSB 12-bit) + Ch4(LSB 12-bit)
+    logic [7:0] copy_write_idx;     // Write index for copy operations
+    logic [7:0] request_build_idx;  // Index register for TX buffer construction
+
+    logic [3:0] current_player;     // Current player index for SWINP parsing (0, 1, 2...)
+    logic [3:0] current_channel;    // Current channel index for ANLINP
+
     // Timing and protocol control
     logic [31:0] delay_counter;    // Multi-purpose delay counter
     logic [31:0] timeout_counter;  // Timeout counter for waiting states
     logic [31:0] poll_timer;       // Timer for input polling frequency
     logic [7:0] current_device_addr; // Address assigned to JVS device (usually 0x01)
+    logic rx_frame_complete;       // Flag indicating frame has been processed and ready for next step
     logic [4:0] last_tx_state;     // Tracks the last command sent for response handling
     
     
@@ -607,6 +524,71 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     assign jvs_data_ready = jvs_data_ready_init | jvs_data_ready_joy;
     
     //=========================================================================
+    // RS485 DIRECTION CONTROL
+    //=========================================================================
+    // Control RS485 transceiver direction based on current state
+    // High = Transmit mode, Low = Receive mode
+    assign o_rx485_dir = (rs485_state == RS485_TX_SETUP || 
+                          rs485_state == RS485_TRANSMIT || 
+                          rs485_state == RS485_TX_HOLD);
+
+    //=========================================================================
+    // RS485 STATE MACHINE
+    //=========================================================================
+    // Manages RS485 transceiver direction with proper setup and hold timing
+    // This is critical for reliable RS485 communication
+    
+    logic [15:0] rs485_setup_counter; // Counter for timing delays
+    
+    always @(posedge i_clk) begin
+        if (i_rst || !i_ena) begin
+            rs485_state <= RS485_RECEIVE;
+            rs485_setup_counter <= 16'h0;
+        end else begin
+            case (rs485_state)
+                RS485_RECEIVE: begin
+                    rs485_setup_counter <= 16'h0;
+                    // Switch to transmit mode when requested
+                    if (rs485_tx_request) begin
+                        rs485_state <= RS485_TX_SETUP;
+                    end
+                end
+                
+                RS485_TX_SETUP: begin
+                    // Setup time: ~10µs (500 cycles at 50MHz)
+                    // This allows the RS485 transceiver to stabilize before data transmission
+                    //if (rs485_setup_counter < 16'd500) begin
+                     if (rs485_setup_counter < TX_SETUP_DELAY_COUNT) begin
+                        rs485_setup_counter <= rs485_setup_counter + 1;
+                    end else begin
+                        rs485_setup_counter <= 16'h0;
+                        rs485_state <= RS485_TRANSMIT;
+                    end
+                end
+                
+                RS485_TRANSMIT: begin
+                    // Stay in transmit mode while data is being sent
+                    if (!rs485_tx_request) begin
+                        rs485_state <= RS485_TX_HOLD;
+                    end
+                end
+                
+                RS485_TX_HOLD: begin
+                    // Hold TX mode after transmission (~30µs)
+                    // This ensures the last bit is fully transmitted before switching to receive
+                    //if (rs485_setup_counter < 16'd1500) begin
+                    if (rs485_setup_counter < TX_HOLD_DELAY_COUNT) begin
+                        rs485_setup_counter <= rs485_setup_counter + 1;
+                    end else begin
+                        rs485_setup_counter <= 16'h0;
+                        rs485_state <= RS485_RECEIVE;
+                    end
+                end
+            endcase
+        end
+    end
+
+    //=========================================================================
     // MAIN STATE MACHINE - JVS PROTOCOL HANDLER
     //=========================================================================
     // Implements the complete JVS initialization sequence and input polling
@@ -614,12 +596,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     always @(posedge i_clk) begin
 
         jvs_data_ready_init <= 1'b0;
-        
-        // Default: Clear all jvs_com control signals (they are pulses)
-        com_tx_data_push <= 1'b0;
-        com_tx_cmd_push <= 1'b0;
-        com_commit <= 1'b0;
-        com_rx_next <= 1'b0;
 
         if (i_rst || !i_ena) begin
             // Initialize all state variables on reset
@@ -628,25 +604,16 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             timeout_counter <= 32'h0;
             poll_timer <= 32'h0;
             current_device_addr <= 8'h01;    // Standard JVS device address
+            rs485_tx_request <= 1'b0;
+            uart_tx_dv <= 1'b0;
             last_tx_state <= 5'h0;
-            
-            // Initialize TX state management
-            return_state <= 5'h0;
-            cmd_pos <= 3'h0;
-            
-            // Initialize jvs_com control signals 
-            com_tx_data <= 8'h00;
-            com_tx_data_push <= 1'b0;
-            com_tx_cmd_push <= 1'b0;
-            com_dst_node <= 8'h00;
-            com_commit <= 1'b0;
-            com_rx_next <= 1'b0;
         end else begin
             case (main_state)
                 //-------------------------------------------------------------
                 // IDLE STATE - Continuous input polling for responsive gaming
                 //-------------------------------------------------------------
                 STATE_IDLE: begin
+                    rs485_tx_request <= 1'b0; // should be already set by STATE_WAIT_TX_HOLD
                     
                     // Fast polling timer for inputs - 1ms interval
                     // This provides responsive gaming experience with minimal latency
@@ -663,6 +630,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // INITIALIZATION DELAY - Wait for system stabilization
                 //-------------------------------------------------------------
                 STATE_INIT_DELAY: begin
+                    rs485_tx_request <= 1'b0;
                     // Initial delay for core I/O initialization - 5.4 seconds
                     // This ensures the FPGA core and external circuits are fully stable
                     //if (delay_counter < 32'h10000000) begin  // 268,435,456 cycles ≈ 5.4s at 50MHz
@@ -678,38 +646,23 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // FIRST RESET COMMAND - Begin JVS device initialization
                 //-------------------------------------------------------------
                 STATE_FIRST_RESET: begin
-                    // Send first RESET command using sequential byte transmission
+                    // Prepare first RESET command frame
                     // JVS requires two reset commands for reliable initialization
-                    if (com_tx_ready) begin
-                        com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Broadcast to all devices
-                        return_state <= STATE_FIRST_RESET;
-                        // Select byte and signal based on position
-                        case (cmd_pos)
-                            3'd0: begin
-                                com_tx_data <= CMD_RESET;     // Reset command (0xF0)
-                                com_tx_cmd_push <= 1'b1;     // Push as command
-                                main_state <= STATE_TX_NEXT; // Go to TX_NEXT
-                            end
-                            3'd1: begin
-                                com_tx_data <= CMD_RESET_ARG; // Reset argument (0xD9)
-                                com_tx_data_push <= 1'b1;    // Push as data  
-                                main_state <= STATE_TX_NEXT; // Go to TX_NEXT
-                            end
-                            default: begin
-                                // All bytes sent, commit and transition
-                                com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
-                                main_state <= STATE_FIRST_RESET_DELAY;
-                                last_tx_state <= STATE_FIRST_RESET;
-                            end
-                        endcase
-                    end
+                    tx_buffer[JVS_SYNC_POS] <= JVS_SYNC_BYTE;       // E0 - Frame start
+                    tx_buffer[JVS_ADDR_POS] <= JVS_BROADCAST_ADDR;  // FF - Broadcast to all devices
+                    tx_buffer[JVS_CMD_START + 0] <= CMD_RESET;        // Reset command (0xF0)
+                    tx_buffer[JVS_CMD_START + 1] <= CMD_RESET_ARG;        // Reset argument (0xD9)
+                    tx_buffer[JVS_LENGTH_POS] <= JVS_OVERHEAD + 1;               // 1 data byte + overhead
+                    rs485_tx_request <= 1'b1;           // Request transmission
+                    last_tx_state <= STATE_FIRST_RESET; // Remember command for response handling
+                    main_state <= STATE_WAIT_TX_SETUP;
                 end
 
                 //-------------------------------------------------------------
                 // DELAY AFTER FIRST RESET
                 //-------------------------------------------------------------
                 STATE_FIRST_RESET_DELAY: begin
+                    rs485_tx_request <= 1'b0;
                     // 2 second delay after first RESET
                     // Allows JVS devices to complete their reset sequence
                     //if (delay_counter < 32'h6000000) begin  // 100,663,296 cycles = 2s at 50MHz
@@ -725,37 +678,22 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // SECOND RESET COMMAND - Ensure complete device reset
                 //-------------------------------------------------------------
                 STATE_SECOND_RESET: begin
-                    // Send second RESET command using sequential byte transmission (identical to first)
-                    if (com_tx_ready) begin
-                        com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Broadcast to all devices
-                        return_state <= STATE_SECOND_RESET;
-                        // Select byte and signal based on position
-                        case (cmd_pos)
-                            3'd0: begin
-                                com_tx_data <= CMD_RESET;     // Reset command (0xF0)
-                                com_tx_cmd_push <= 1'b1;     // Push as command
-                                main_state <= STATE_TX_NEXT; // Go to TX_NEXT
-                            end
-                            3'd1: begin
-                                com_tx_data <= CMD_RESET_ARG; // Reset argument (0xD9)
-                                com_tx_data_push <= 1'b1;    // Push as data  
-                                main_state <= STATE_TX_NEXT; // Go to TX_NEXT
-                            end
-                            default: begin
-                                // All bytes sent, commit and transition
-                                com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
-                                main_state <= STATE_SECOND_RESET_DELAY;
-                                last_tx_state <= STATE_SECOND_RESET;
-                            end
-                        endcase
-                    end
+                    // Prepare second RESET command frame (identical to first)
+                    tx_buffer[JVS_SYNC_POS] <= JVS_SYNC_BYTE;       // E0
+                    tx_buffer[JVS_ADDR_POS] <= JVS_BROADCAST_ADDR;  // FF
+                    tx_buffer[JVS_CMD_START + 0] <= CMD_RESET;        // F0
+                    tx_buffer[JVS_CMD_START + 1] <= CMD_RESET_ARG;        // D9
+                    tx_buffer[JVS_LENGTH_POS] <= JVS_OVERHEAD + 1;               // 1 data byte + overhead
+                    rs485_tx_request <= 1'b1;
+                    last_tx_state <= STATE_SECOND_RESET;
+                    main_state <= STATE_WAIT_TX_SETUP;
                 end
 
                 //-------------------------------------------------------------
                 // DELAY AFTER SECOND RESET
                 //-------------------------------------------------------------
                 STATE_SECOND_RESET_DELAY: begin
+                    rs485_tx_request <= 1'b0;
                     // 500ms delay after second RESET
                     // Shorter delay as devices should be ready after two resets
                     //if (delay_counter < 32'h1800000) begin  // 25,165,824 cycles = 500ms at 50MHz
@@ -771,212 +709,187 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // SET ADDRESS COMMAND - Assign unique address to device
                 //-------------------------------------------------------------
                 STATE_SEND_SETADDR: begin
-                    // Send SET ADDRESS command using sequential byte transmission
+                    // Prepare SET ADDRESS command frame
                     // This assigns a unique address (0x01) to the JVS device
-                    if (com_tx_ready) begin
-                        // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Still broadcast for address assignment
-                            return_state <= STATE_SEND_SETADDR;
-                        end
-                        
-                        // Select byte and signal based on position
-                        case (cmd_pos)
-                            3'd0: begin
-                                com_tx_data <= CMD_SETADDR;         // Set address command (0xF1)
-                                com_tx_cmd_push <= 1'b1;            // Push as command
-                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
-                            end
-                            3'd1: begin
-                                com_tx_data <= current_device_addr; // 01 - Address to assign
-                                com_tx_data_push <= 1'b1;           // Push as data
-                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
-                            end
-                            default: begin
-                                // All bytes sent, commit and transition
-                                com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
-                                main_state <= STATE_WAIT_RX;
-                                last_tx_state <= STATE_SEND_SETADDR;
-                            end
-                        endcase
-                    end
+                    tx_buffer[JVS_SYNC_POS] <= JVS_SYNC_BYTE;       // E0
+                    tx_buffer[JVS_ADDR_POS] <= JVS_BROADCAST_ADDR;  // FF - Still broadcast for address assignment
+                    tx_buffer[JVS_CMD_START + 0] <= CMD_SETADDR;         // Set address command (0xF1)
+                    tx_buffer[JVS_CMD_START + 1] <= current_device_addr; // 01 - Address to assign
+                    tx_buffer[JVS_LENGTH_POS] <= JVS_OVERHEAD + 1;               // 1 data byte + overhead
+                    rs485_tx_request <= 1'b1;
+                    last_tx_state <= STATE_SEND_SETADDR;
+                    main_state <= STATE_WAIT_TX_SETUP;
                 end
 
                 //-------------------------------------------------------------
                 // READ ID COMMAND - Request device identification
                 //-------------------------------------------------------------
                 STATE_SEND_READID: begin
-                    // Send READ ID command using sequential byte transmission
+                    // Prepare READ ID command frame
                     // This requests the device to send its identification string
-                    if (com_tx_ready) begin
-                        // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= current_device_addr; // 01 - Address specific device
-                            return_state <= STATE_SEND_READID;
-                        end
-                        
-                        // Select byte and signal based on position
-                        case (cmd_pos)
-                            3'd0: begin
-                                com_tx_data <= CMD_IOIDENT;          // IO identity command (0x10)
-                                com_tx_cmd_push <= 1'b1;             // Push as command
-                                main_state <= STATE_TX_NEXT;         // Go to TX_NEXT
-                            end
-                            default: begin
-                                // All bytes sent, commit and transition
-                                com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
-                                main_state <= STATE_WAIT_RX;
-                                last_tx_state <= STATE_SEND_READID;
-                            end
-                        endcase
-                    end
+                    tx_buffer[JVS_SYNC_POS] <= JVS_SYNC_BYTE;       // E0
+                    tx_buffer[JVS_ADDR_POS] <= current_device_addr; // 01 - Address specific device
+                    tx_buffer[JVS_CMD_START + 0] <= CMD_IOIDENT;          // IO identity command (0x10)
+                    tx_buffer[JVS_LENGTH_POS] <= JVS_OVERHEAD + 0;               // 0 data byte + overhead (just command)
+                    rs485_tx_request <= 1'b1;
+                    last_tx_state <= STATE_SEND_READID;
+                    main_state <= STATE_WAIT_TX_SETUP;
                 end
 
                 //-------------------------------------------------------------
                 // COMMAND REVISION REQUEST - Get command format revision
                 //-------------------------------------------------------------
                 STATE_SEND_CMDREV: begin
-                    // Send CMDREV command using sequential byte transmission
-                    if (com_tx_ready) begin
-                        // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= current_device_addr; // 01
-                            return_state <= STATE_SEND_CMDREV;
-                        end
-                        
-                        // Select byte and signal based on position
-                        case (cmd_pos)
-                            3'd0: begin
-                                com_tx_data <= CMD_CMDREV;          // Command revision command (0x11)
-                                com_tx_cmd_push <= 1'b1;            // Push as command
-                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
-                            end
-                            default: begin
-                                // All bytes sent, commit and transition
-                                com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
-                                main_state <= STATE_WAIT_RX;
-                                last_tx_state <= STATE_SEND_CMDREV;
-                            end
-                        endcase
-                    end
+                    // Prepare CMDREV command frame
+                    tx_buffer[JVS_SYNC_POS] <= JVS_SYNC_BYTE;       // E0
+                    tx_buffer[JVS_ADDR_POS] <= current_device_addr; // 01
+                    tx_buffer[JVS_CMD_START + 0] <= CMD_CMDREV;          // Command revision command (0x11)
+                    tx_buffer[JVS_LENGTH_POS] <= JVS_OVERHEAD + 0;               // 0 data byte + overhead (just command)
+                    rs485_tx_request <= 1'b1;
+                    last_tx_state <= STATE_SEND_CMDREV;
+                    main_state <= STATE_WAIT_TX_SETUP;
                 end
 
                 //-------------------------------------------------------------
                 // JVS REVISION REQUEST - Get JVS protocol revision
                 //-------------------------------------------------------------
                 STATE_SEND_JVSREV: begin
-                    // Send JVSREV command using sequential byte transmission
-                    if (com_tx_ready) begin
-                        // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= current_device_addr; // 01
-                            return_state <= STATE_SEND_JVSREV;
-                        end
-                        
-                        // Select byte and signal based on position
-                        case (cmd_pos)
-                            3'd0: begin
-                                com_tx_data <= CMD_JVSREV;          // JVS revision command (0x12)
-                                com_tx_cmd_push <= 1'b1;            // Push as command
-                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
-                            end
-                            default: begin
-                                // All bytes sent, commit and transition
-                                com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
-                                main_state <= STATE_WAIT_RX;
-                                last_tx_state <= STATE_SEND_JVSREV;
-                            end
-                        endcase
-                    end
+                    // Prepare JVSREV command frame
+                    tx_buffer[JVS_SYNC_POS] <= JVS_SYNC_BYTE;       // E0
+                    tx_buffer[JVS_ADDR_POS] <= current_device_addr; // 01
+                    tx_buffer[JVS_CMD_START + 0] <= CMD_JVSREV;          // JVS revision command (0x12)
+                    tx_buffer[JVS_LENGTH_POS] <= JVS_OVERHEAD + 0;               // 0 data byte + overhead (just command)
+                    rs485_tx_request <= 1'b1;
+                    last_tx_state <= STATE_SEND_JVSREV;
+                    main_state <= STATE_WAIT_TX_SETUP;
                 end
 
                 //-------------------------------------------------------------
                 // COMMUNICATIONS VERSION REQUEST - Get communication version
                 //-------------------------------------------------------------
                 STATE_SEND_COMMVER: begin
-                    // Send COMMVER command using sequential byte transmission
-                    if (com_tx_ready) begin
-                        // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= current_device_addr; // 01
-                            return_state <= STATE_SEND_COMMVER;
-                        end
-                        
-                        // Select byte and signal based on position
-                        case (cmd_pos)
-                            3'd0: begin
-                                com_tx_data <= CMD_COMMVER;         // Communication version command (0x13)
-                                com_tx_cmd_push <= 1'b1;            // Push as command
-                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
-                            end
-                            default: begin
-                                // All bytes sent, commit and transition
-                                com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
-                                main_state <= STATE_WAIT_RX;
-                                last_tx_state <= STATE_SEND_COMMVER;
-                            end
-                        endcase
-                    end
+                    // Prepare COMMVER command frame
+                    tx_buffer[JVS_SYNC_POS] <= JVS_SYNC_BYTE;       // E0
+                    tx_buffer[JVS_ADDR_POS] <= current_device_addr; // 01
+                    tx_buffer[JVS_CMD_START + 0] <= CMD_COMMVER;         // Communication version command (0x13)
+                    tx_buffer[JVS_LENGTH_POS] <= JVS_OVERHEAD + 0;               // 0 data byte + overhead (just command)
+                    rs485_tx_request <= 1'b1;
+                    last_tx_state <= STATE_SEND_COMMVER;
+                    main_state <= STATE_WAIT_TX_SETUP;
                 end
 
                 //-------------------------------------------------------------
                 // FEATURE CHECK REQUEST - Get device capabilities
                 //-------------------------------------------------------------
                 STATE_SEND_FEATCHK: begin
-                    // Send FEATCHK command using sequential byte transmission
-                    if (com_tx_ready) begin
-                        // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= current_device_addr; // 01
-                            return_state <= STATE_SEND_FEATCHK;
-                        end
-                        
-                        // Select byte and signal based on position
-                        case (cmd_pos)
-                            3'd0: begin
-                                com_tx_data <= CMD_FEATCHK;         // Feature check command (0x14)
-                                com_tx_cmd_push <= 1'b1;            // Push as command
-                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
-                            end
-                            default: begin
-                                // All bytes sent, commit and transition
-                                com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
-                                main_state <= STATE_WAIT_RX;
-                                last_tx_state <= STATE_SEND_FEATCHK;
-                            end
-                        endcase
-                    end
+                    // Prepare FEATCHK command frame
+                    tx_buffer[JVS_SYNC_POS] <= JVS_SYNC_BYTE;       // E0
+                    tx_buffer[JVS_ADDR_POS] <= current_device_addr; // 01
+                    tx_buffer[JVS_CMD_START + 0] <= CMD_FEATCHK;         // Feature check command (0x14)
+                    tx_buffer[JVS_LENGTH_POS] <= JVS_OVERHEAD + 0;               // 0 data byte + overhead (just command)
+                    rs485_tx_request <= 1'b1;
+                    last_tx_state <= STATE_SEND_FEATCHK;
+                    main_state <= STATE_WAIT_TX_SETUP;
                 end
 
                 //-------------------------------------------------------------
                 // READ INPUTS COMMAND - Request current input states
                 //-------------------------------------------------------------
                 STATE_SEND_INPUTS: begin
-                    // Send input commands using new jvs_com interface
-                    if (com_tx_ready) begin
-                        // Set destination node
-                        com_dst_node <= current_device_addr; // 01
-                        
-                        // Begin progressive state machine - start with switch inputs
-                        main_state <= STATE_SEND_INPUTS_SWITCH;
+                    // Initialize INPUT PULLING frame progressive construction
+                    // Start with basic frame header
+                    tx_buffer[JVS_SYNC_POS] <= JVS_SYNC_BYTE;       // E0 - Sync byte
+                    tx_buffer[JVS_ADDR_POS] <= current_device_addr; // Device address (01)
+                    
+                    // Use JVS_LENGTH_POS as data byte counter (starts at 0)
+                    tx_buffer[JVS_LENGTH_POS] <= 8'd0;  // Start counting data bytes from 0
+                    
+                    // Begin progressive state machine - start with switch inputs
+                    main_state <= STATE_SEND_INPUTS_SWITCH;
+                end
+
+                //-------------------------------------------------------------
+                // WAIT FOR RS485 SETUP - Ensure proper transceiver timing
+                //-------------------------------------------------------------
+                STATE_WAIT_TX_SETUP: begin
+                    // Wait for RS485 transceiver to enter transmit mode
+                    if (rs485_state == RS485_TRANSMIT) begin
+                        tx_counter <= 8'h00;                    // Reset byte counter
+                        tx_checksum <= 8'h00;                   // Reset checksum
+                        tx_length <= JVS_CMD_START + tx_buffer[JVS_LENGTH_POS];       // Calculate total frame length
+                        main_state <= STATE_TRANSMIT_BYTE;
                     end
                 end
 
-                // TX states removed - jvs_com module now handles all transmission
+                //-------------------------------------------------------------
+                // TRANSMIT BYTES - Send frame data byte by byte
+                //-------------------------------------------------------------
+                STATE_TRANSMIT_BYTE: begin
+                    if (tx_counter < tx_length) begin
+                        // Wait for UART to be ready for next byte
+                        if (!uart_tx_active && !uart_tx_dv) begin
+                            // Calculate running checksum for data bytes
+                            // (Skip sync byte and checksum position)
+                            if (tx_counter > 0 && tx_counter < tx_length - 1) begin
+                                tx_checksum <= tx_checksum + tx_buffer[tx_counter];
+                            end
+                            
+                            // Send either data byte or calculated checksum
+                            if (tx_counter == tx_length - 1) begin
+                                uart_tx_byte <= tx_checksum;        // Send checksum as last byte
+                            end else begin
+                                uart_tx_byte <= tx_buffer[tx_counter]; // Send data byte
+                            end
+                            
+                            uart_tx_dv <= 1'b1;                     // Start UART transmission
+                            main_state <= STATE_WAIT_TX_DONE;
+                        end
+                    end else begin
+                        // All bytes transmitted
+                        rs485_tx_request <= 1'b0;               // Release RS485 request
+                        main_state <= STATE_WAIT_TX_HOLD;
+                    end
+                end
+
+                //-------------------------------------------------------------
+                // WAIT FOR TRANSMISSION COMPLETION
+                //-------------------------------------------------------------
+                STATE_WAIT_TX_DONE: begin
+                    // Clear data valid signal when UART starts transmission
+                    if (uart_tx_dv && uart_tx_active) begin
+                        uart_tx_dv <= 1'b0;
+                    end
+                    // Move to next byte when current transmission completes
+                    if (uart_tx_done) begin
+                        tx_counter <= tx_counter + 1;
+                        main_state <= STATE_TRANSMIT_BYTE;
+                    end
+                end
+
+                //-------------------------------------------------------------
+                // WAIT FOR RS485 HOLD TIME
+                //-------------------------------------------------------------
+                STATE_WAIT_TX_HOLD: begin
+                    // Wait for RS485 to return to receive mode
+                    if (rs485_state == RS485_RECEIVE) begin
+                        timeout_counter <= 32'h0;
+                        // Determine next state based on what was just transmitted
+                        case (last_tx_state)
+                            STATE_FIRST_RESET: main_state <= STATE_FIRST_RESET_DELAY;
+                            STATE_SECOND_RESET: main_state <= STATE_SECOND_RESET_DELAY;
+                            STATE_SEND_INPUTS: main_state <= STATE_WAIT_RX;
+                            default: main_state <= STATE_WAIT_RX;  // Commands expecting response
+                        endcase
+                    end
+                end
 
                 //-------------------------------------------------------------
                 // WAIT FOR DEVICE RESPONSE
                 //-------------------------------------------------------------
                 STATE_WAIT_RX: begin
-                    if (com_rx_complete) begin
-                        // Process response based on command sent (now available via com_src_cmd)
-                        case (com_src_cmd)
+                    if (rx_frame_complete) begin
+                        // Process response based on command sent
+                        case (tx_buffer[JVS_CMD_START])
                             CMD_SETADDR: main_state <= STATE_SEND_READID;    // Address set, now read ID
                             CMD_IOIDENT: main_state <= STATE_SEND_CMDREV;     // ID read, get command revision
                             CMD_CMDREV: main_state <= STATE_SEND_JVSREV;     // Command revision read, get JVS revision
@@ -994,7 +907,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                         timeout_counter <= timeout_counter + 1;
                     end else begin
                         // Timeout handling - different strategies for different commands
-                        case (com_src_cmd)
+                        case (tx_buffer[JVS_CMD_START])
                             CMD_SETADDR: main_state <= STATE_FIRST_RESET;    // Critical - restart sequence
                             CMD_IOIDENT: main_state <= STATE_SEND_READID;     // Retry ID read
                             CMD_CMDREV: main_state <= STATE_SEND_CMDREV;     // Retry command revision
@@ -1012,84 +925,98 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 
                 STATE_SEND_INPUTS_SWITCH: begin
                     if (jvs_nodes.node_players[current_device_addr - 1] > 0) begin
-                        // Push SWINP command and parameters
-                        com_tx_data <= CMD_SWINP; // SWINP command (0x20)
-                        com_tx_cmd_push <= 1'b1;  // Push as command
-                        
-                        com_tx_data <= jvs_nodes.node_players[current_device_addr - 1];  // Number of players
-                        com_tx_data_push <= 1'b1; // Push as data
-                        
-                        com_tx_data <= (jvs_nodes.node_buttons[current_device_addr - 1] + 7) / 8; // Compute number of bytes to include all per player bits
-                        com_tx_data_push <= 1'b1; // Push as data
+                        request_build_idx = tx_buffer[JVS_LENGTH_POS];
+                        // Add SWINP command and parameters using blocking assignments for index calculations
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= CMD_SWINP; // SWINP command (0x20)
+                        request_build_idx = request_build_idx + 1;
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= jvs_nodes.node_players[current_device_addr - 1];  // Number of players
+                        request_build_idx = request_build_idx + 1;
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= (jvs_nodes.node_buttons[current_device_addr - 1] + 7) / 8; // Compute number of bytes to include all per player bits
+                        request_build_idx = request_build_idx + 1;
+                        // Update length with final byte count
+                        tx_buffer[JVS_LENGTH_POS] <= request_build_idx;
                     end
                     main_state <= STATE_SEND_INPUTS_COIN;
                 end
                 
                 STATE_SEND_INPUTS_COIN: begin
                     if (jvs_nodes.node_coin_slots[current_device_addr - 1] > 0) begin
-                        // Push coin input command
-                        com_tx_data <= CMD_COININP; // COININP command (0x21)
-                        com_tx_cmd_push <= 1'b1;    // Push as command
-                        
-                        com_tx_data <= jvs_nodes.node_coin_slots[current_device_addr - 1]; // Number of coin slots
-                        com_tx_data_push <= 1'b1;   // Push as data
+                        request_build_idx = tx_buffer[JVS_LENGTH_POS];
+                        // Add coin input command using blocking assignments for index calculations
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= CMD_COININP; // COININP command (0x21)
+                        request_build_idx = request_build_idx + 1;
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= jvs_nodes.node_coin_slots[current_device_addr - 1]; // Number of coin slots
+                        request_build_idx = request_build_idx + 1;
+                        // Update length with final byte count
+                        tx_buffer[JVS_LENGTH_POS] <= request_build_idx;
                     end
                     main_state <= STATE_SEND_INPUTS_ANALOG;
                 end
                 
                 STATE_SEND_INPUTS_ANALOG: begin
                     if (jvs_nodes.node_analog_channels[current_device_addr - 1] > 0) begin
-                        // Push analog input command
-                        com_tx_data <= CMD_ANLINP; // ANLINP command (0x22)
-                        com_tx_cmd_push <= 1'b1;   // Push as command
-                        
-                        com_tx_data <= jvs_nodes.node_analog_channels[current_device_addr - 1]; // Number of analog channels
-                        com_tx_data_push <= 1'b1;  // Push as data
+                        request_build_idx = tx_buffer[JVS_LENGTH_POS];
+                        // Add analog input command using blocking assignments for index calculations
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= CMD_ANLINP; // ANLINP command (0x22)
+                        request_build_idx = request_build_idx + 1;
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= jvs_nodes.node_analog_channels[current_device_addr - 1]; // Number of analog channels
+                        request_build_idx = request_build_idx + 1;
+                        // Update length with final byte count
+                        tx_buffer[JVS_LENGTH_POS] <= request_build_idx;
                     end
                     main_state <= STATE_SEND_INPUTS_ROTARY;
                 end
                 
                 STATE_SEND_INPUTS_ROTARY: begin
                     if (jvs_nodes.node_rotary_channels[current_device_addr - 1] > 0) begin
-                        // Push rotary input command
-                        com_tx_data <= CMD_ROTINP;  // ROTINP command (0x23)
-                        com_tx_cmd_push <= 1'b1;    // Push as command
-                        
-                        com_tx_data <= jvs_nodes.node_rotary_channels[current_device_addr - 1]; // Number of rotary channels
-                        com_tx_data_push <= 1'b1;   // Push as data
+                        request_build_idx = tx_buffer[JVS_LENGTH_POS];
+                        // Add rotary input command using blocking assignments for index calculations
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= CMD_ROTINP;  // ROTINP command (0x23)
+                        request_build_idx = request_build_idx + 1;
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= jvs_nodes.node_rotary_channels[current_device_addr - 1]; // Number of rotary channels
+                        request_build_idx = request_build_idx + 1;
+                        // Update length with final byte count
+                        tx_buffer[JVS_LENGTH_POS] <= request_build_idx + 1;
                     end
                     main_state <= STATE_SEND_INPUTS_KEYCODE;
                 end
                 
                 STATE_SEND_INPUTS_KEYCODE: begin
                     if (jvs_nodes.node_has_keycode_input[current_device_addr - 1]) begin
-                        // Push keycode input command (no parameters)
-                        com_tx_data <= CMD_KEYINP;  // KEYINP command (0x24)
-                        com_tx_cmd_push <= 1'b1;    // Push as command
+                        request_build_idx = tx_buffer[JVS_LENGTH_POS];
+                        // Add keycode input command (no parameters) using blocking assignments for index calculations
+                        request_build_idx = request_build_idx + 1;
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= CMD_KEYINP;  // KEYINP command (0x24)
+                        // Update length with final byte count
+                        tx_buffer[JVS_LENGTH_POS] <= request_build_idx;
                     end
                     main_state <= STATE_SEND_INPUTS_SCREEN;
                 end
                 
                 STATE_SEND_INPUTS_SCREEN: begin
                     if (jvs_nodes.node_has_screen_pos[current_device_addr - 1]) begin
-                        // Push screen position input command
-                        com_tx_data <= CMD_SCRPOSINP;  // SCRPOSINP command (0x25)
-                        com_tx_cmd_push <= 1'b1;       // Push as command
-                        
-                        com_tx_data <= 8'h01;          // Channel index
-                        com_tx_data_push <= 1'b1;      // Push as data
+                        request_build_idx = tx_buffer[JVS_LENGTH_POS];
+                        // Add screen position input command using blocking assignments for index calculations
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= CMD_SCRPOSINP;  // SCRPOSINP command (0x25)
+                        request_build_idx = request_build_idx + 1;
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= 8'h01;  // Channel index
+                        request_build_idx = request_build_idx + 1;
+                        // Update length with final byte count
+                        tx_buffer[JVS_LENGTH_POS] <= request_build_idx;
                     end
                     main_state <= STATE_SEND_INPUTS_MISC;
                 end
                 
                 STATE_SEND_INPUTS_MISC: begin
                     if (jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] > 0) begin
-                        // Push misc switch input command
-                        com_tx_data <= CMD_MISCSWINP;  // MISCSWINP command (0x26)
-                        com_tx_cmd_push <= 1'b1;       // Push as command
-                        
-                        com_tx_data <= (jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] + 7) / 8; // Bytes needed
-                        com_tx_data_push <= 1'b1;      // Push as data
+                        request_build_idx = tx_buffer[JVS_LENGTH_POS];
+                        // Add misc switch input command using blocking assignments for index calculations
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= CMD_MISCSWINP;  // MISCSWINP command (0x26)
+                        request_build_idx = request_build_idx + 1;
+                        tx_buffer[JVS_CMD_START + request_build_idx] <= (jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] + 7) / 8; // Bytes needed
+                        request_build_idx = request_build_idx + 1;
+                        // Update length with final byte count
+                        tx_buffer[JVS_LENGTH_POS] <= request_build_idx;
                     end
                     main_state <= STATE_SEND_OUTPUT_DIGITAL;
                 end
@@ -1097,49 +1024,33 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 STATE_SEND_OUTPUT_DIGITAL: begin
                     // Check if device has digital outputs
                     if (jvs_nodes.node_digital_outputs[current_device_addr - 1] > 0) begin
+                        request_build_idx = tx_buffer[JVS_LENGTH_POS];
                         if (jvs_nodes.node_players[current_device_addr - 1] == 1) begin
-                            // Push OUTPUT1 command frame for GPIO control
-                            com_tx_data <= CMD_OUTPUT1;         // OUTPUT1 command (0x32)
-                            com_tx_cmd_push <= 1'b1;            // Push as command
-                            
-                            com_tx_data <= 8'h03;               // send 3 bytes (from time crisis 4 capture althouth that FEATCHK report 12 channels/bits?)
-                            com_tx_data_push <= 1'b1;           // Push as data
-                            
-                            com_tx_data <= gpio_output_value;   // Set GPIO1 to current value from SNAC
-                            com_tx_data_push <= 1'b1;           // Push as data
-                            
-                            com_tx_data <= 8'hA0;               // do not know what A is for, but taken from TC4 capture
-                            com_tx_data_push <= 1'b1;           // Push as data
-                            
-                            com_tx_data <= 8'h00;
-                            com_tx_data_push <= 1'b1;           // Push as data
+                            // Build OUTPUT1 command frame for GPIO control
+                            tx_buffer[JVS_CMD_START + request_build_idx] <= CMD_OUTPUT1;         // OUTPUT1 command (0x32)
+                            request_build_idx = request_build_idx + 1;
+                            tx_buffer[JVS_CMD_START + request_build_idx] <= 8'h03;           // send 3 bytes (from time crisis 4 capture althouth that FEATCHK report 12 channels/bits?)
+                            request_build_idx = request_build_idx + 1;
+                            tx_buffer[JVS_CMD_START + request_build_idx] <= gpio_output_value;  // Set GPIO1 to current value from SNAC
+                            request_build_idx = request_build_idx + 1;
+                            tx_buffer[JVS_CMD_START + request_build_idx] <= 8'hA0;              // do not know what A is for, but taken from TC4 capture
+                            request_build_idx = request_build_idx + 1;
+                            tx_buffer[JVS_CMD_START + request_build_idx] <= 8'h00;
+                            request_build_idx = request_build_idx + 1;
                         end
+                        // Update length with final byte count
+                        tx_buffer[JVS_LENGTH_POS] <= request_build_idx;
                     end
                     main_state <= STATE_SEND_FINALIZE;
                 end
 
                 STATE_SEND_FINALIZE: begin
-                    // Commit and transmit frame using new jvs_com interface
-                    com_commit <= 1'b1;
-                    
-                    // Wait for response
-                    main_state <= STATE_WAIT_RX;
+                    // Add checksum size byte count to get total frame length
+                    tx_buffer[JVS_LENGTH_POS] <= tx_buffer[JVS_LENGTH_POS] + JVS_CHECKSUM_SIZE;
+                    // Start transmission
+                    rs485_tx_request <= 1'b1;
                     last_tx_state <= STATE_SEND_INPUTS;
-                end
-
-                //-------------------------------------------------------------
-                // GENERIC TX NEXT STATE - Handles pulse cleanup and position increment
-                //-------------------------------------------------------------
-                STATE_TX_NEXT: begin
-                    // Reset all push signals to 0 (they were set to 1 in calling state)
-                    com_tx_cmd_push <= 1'b0;
-                    com_tx_data_push <= 1'b0;
-                    
-                    // Increment position
-                    cmd_pos <= cmd_pos + 1;
-                    
-                    // Return to calling state
-                    main_state <= return_state;
+                    main_state <= STATE_WAIT_TX_SETUP;
                 end
                 
                 default: main_state <= STATE_IDLE;
@@ -1153,16 +1064,21 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     // Handles byte-by-byte reception of JVS frames with checksum validation
     
     always @(posedge i_clk) begin
-        com_src_cmd_next <= 1'b0;
+
     //initial content for simulation without JVS device
     `ifdef USE_DUMMY_JVS_DATA
         jvs_nodes_r2 <= JVS_INFO_INIT;
     `endif
-
+    
         jvs_data_ready_joy <= 1'b0;
 
         if (i_rst || !i_ena) begin
-            // Initialize output registers
+            // Initialize RX state machine and output registers
+            rx_state <= RX_IDLE;
+            rx_frame_complete <= 1'b0;
+            rx_counter <= 8'h00;
+            rx_length <= 8'h00;
+            rx_checksum <= 8'h00;
             
             // Initialize JVS node information (single node only)
             jvs_nodes_r.node_id[0] <= 8'h01;
@@ -1200,43 +1116,1171 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             p3_btn_state <= 16'h0000;
             p4_btn_state <= 16'h0000;
             
+
+            
         end else begin
-            // RX frame processing managed by jvs_com module
+            // Clear frame complete flag when main state machine processes it
+            if (main_state != STATE_WAIT_RX) begin
+                rx_frame_complete <= 1'b0;
+            end
             
             
-            // Process incoming frames from jvs_com module
-            // For now, simplified processing - full RX parsing needs state machine implementation
-            if (com_rx_complete && !com_rx_error) begin
-                // Process response based on command that was sent
-                case (com_src_cmd)
-                    CMD_CMDREV, CMD_JVSREV, CMD_COMMVER: begin
-                        // Single byte responses - read version
-                        if (com_rx_remaining > 0) begin
-                            case (com_src_cmd)
-                                CMD_CMDREV: jvs_nodes_r.node_cmd_ver[current_device_addr - 1] <= com_rx_byte;
-                                CMD_JVSREV: jvs_nodes_r.node_jvs_ver[current_device_addr - 1] <= com_rx_byte;
-                                CMD_COMMVER: jvs_nodes_r.node_com_ver[current_device_addr - 1] <= com_rx_byte;
-                            endcase
+            // Process incoming bytes from UART
+            if (uart_rx_dv) begin
+                case (rx_state)
+                    //-----------------------------------------------------
+                    // RX_IDLE - Wait for frame start (sync byte)
+                    //-----------------------------------------------------
+                    RX_IDLE: begin
+                        if (uart_rx_byte == JVS_SYNC_BYTE) begin  // E0 detected
+                            rx_counter <= 8'h01;                  // Next byte position
+                            rx_checksum <= 8'h00;                 // Reset checksum
+                            rx_buffer_raw[0] <= uart_rx_byte;         // Store sync byte
+                            rx_frame_complete <= 1'b0;
+                            rx_state <= RX_READ_ADDR;
+                        end else begin
+                            rx_counter <= 0;                      // Reset on invalid data
                         end
                     end
                     
-                    CMD_SWINP: begin
-                        // Signal input data ready for gaming
-                        jvs_data_ready_joy <= 1'b1;
+                    //-----------------------------------------------------
+                    // RX_READ_ADDR - Read address byte (should be 0x00 for master)
+                    //-----------------------------------------------------
+                    RX_READ_ADDR: begin
+                        if (uart_rx_byte == JVS_HOST_ADDR) begin          // Valid master address
+                            rx_buffer_raw[rx_counter] <= uart_rx_byte;
+                            rx_checksum <= rx_checksum + uart_rx_byte; // Add to checksum
+                            rx_counter <= rx_counter + 1;
+                            rx_state <= RX_READ_SIZE;
+                        end else begin
+                            rx_counter <= 0;                      // Invalid address, restart
+                            rx_state <= RX_IDLE;
+                        end
+                    end
+                    
+                    //-----------------------------------------------------
+                    // RX_READ_SIZE - Read frame length byte
+                    //-----------------------------------------------------
+                    RX_READ_SIZE: begin
+                        rx_buffer_raw[rx_counter] <= uart_rx_byte;
+                        rx_checksum <= rx_checksum + uart_rx_byte;
+                        rx_length <= uart_rx_byte;                // Store frame length
+                        rx_counter <= rx_counter + 1;
+                        rx_state <= RX_READ_DATA;
+                    end
+                    
+                    //-----------------------------------------------------
+                    // RX_READ_DATA - Read data bytes and validate checksum
+                    //-----------------------------------------------------
+                    RX_READ_DATA: begin
+                        rx_buffer_raw[rx_counter] <= uart_rx_byte;
+                        
+                        if (rx_counter < (JVS_OVERHEAD + rx_length)) begin
+                            // Still reading data bytes
+                            rx_checksum <= rx_checksum + uart_rx_byte;
+                            rx_counter <= rx_counter + 1;
+                        end else begin
+                            // Last byte (checksum) received
+                            if (rx_checksum == uart_rx_byte) begin
+                                rx_state <= RX_UNESCAPE;          // Checksum valid, start unescaping
+                                copy_read_idx <= 8'd0;            // Start reading from beginning
+                                copy_write_idx <= 8'd0;           // Start writing from beginning
+                                rx_counter <= 0;
+                            end else begin
+                                rx_state <= RX_IDLE;              // Checksum invalid, discard frame
+                                rx_counter <= 0;
+                            end
+                        end
+                    end
+                    
+                    default: rx_state <= RX_IDLE;
+                endcase
+            end
+            
+            //-------------------------------------------------------------
+            // RX_UNESCAPE - Copy from raw buffer to final buffer, processing escape sequences
+            //-------------------------------------------------------------
+            if (rx_state == RX_UNESCAPE) begin
+                if (copy_read_idx <= (JVS_OVERHEAD + rx_length)) begin // Process header + data + checksum
+                    if (copy_read_idx < JVS_STATUS_POS) begin
+                        // Copy header bytes as-is (sync, addr, length)
+                        rx_buffer[copy_write_idx] <= rx_buffer_raw[copy_read_idx];
+                        copy_read_idx <= copy_read_idx + 1;
+                        copy_write_idx <= copy_write_idx + 1;
+                    end else if (copy_read_idx < (JVS_OVERHEAD + rx_length)) begin // In data section
+                        // Check for escape sequences in data section
+                        if (rx_buffer_raw[copy_read_idx] == JVS_ESCAPE_BYTE && 
+                            copy_read_idx + 1 <= (JVS_OVERHEAD + rx_length) &&
+                            (rx_buffer_raw[copy_read_idx + 1] == JVS_ESCAPED_E0 || 
+                             rx_buffer_raw[copy_read_idx + 1] == JVS_ESCAPED_D0)) begin
+                            // Process escape sequence
+                            if (rx_buffer_raw[copy_read_idx + 1] == JVS_ESCAPED_E0) begin
+                                rx_buffer[copy_write_idx] <= JVS_SYNC_BYTE; // D0 DF -> E0
+                            end else begin
+                                rx_buffer[copy_write_idx] <= JVS_ESCAPE_BYTE; // D0 CF -> D0
+                            end
+                            copy_read_idx <= copy_read_idx + 2; // Skip both escape bytes
+                            copy_write_idx <= copy_write_idx + 1;
+                            // Update length in final buffer (remove 1 byte)
+                            rx_buffer[JVS_LENGTH_POS] <= rx_buffer[JVS_LENGTH_POS] - 1;
+                        end else begin
+                            // Normal byte, copy as-is
+                            rx_buffer[copy_write_idx] <= rx_buffer_raw[copy_read_idx];
+                            copy_read_idx <= copy_read_idx + 1;
+                            copy_write_idx <= copy_write_idx + 1;
+                        end
+                    end else begin
+                        // Copy checksum
+                        rx_buffer[copy_write_idx] <= rx_buffer_raw[copy_read_idx];
+                        copy_read_idx <= copy_read_idx + 1;
+                        copy_write_idx <= copy_write_idx + 1;
+                    end
+                end else begin
+                    // Finished unescaping, move to process
+                    rx_state <= RX_PROCESS;
+                end
+            end
+
+            //-------------------------------------------------------------
+            // RX_COPY_NAME - Copy node name from READ ID response
+            //-------------------------------------------------------------
+            if (rx_state == RX_COPY_NAME) begin
+                if (copy_read_idx < (JVS_OVERHEAD + rx_buffer[JVS_LENGTH_POS]) && copy_write_idx < jvs_node_info_pkg::NODE_NAME_SIZE - 1) begin
+                    // Check for null terminator
+                    if (rx_buffer[copy_read_idx] == 8'h00) begin
+                        // Found null terminator, finish copying
+                        //jvs_nodes.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
+                        node_name_ram[copy_write_idx] <= 8'h00; // Also update RAM
+                        rx_frame_complete <= 1'b1;     // Signal frame complete to main state machine
+                        rx_counter <= 8'h00;           // Reset counter for next frame
+                        rx_state <= RX_IDLE;           // Return to idle for next frame
+                    end else begin
+                        // Copy character and advance indices
+                        //jvs_nodes.node_name[current_device_addr - 1][copy_write_idx] <= rx_buffer[copy_read_idx];
+                        node_name_ram[copy_write_idx] <= rx_buffer[copy_read_idx]; // Also update RAM
+                        copy_read_idx <= copy_read_idx + 1;
+                        copy_write_idx <= copy_write_idx + 1;
+                    end
+                end else begin
+                    // Reached end of buffer or max name size, null terminate and finish
+                    //jvs_nodes.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
+                    node_name_ram[copy_write_idx] <= 8'h00; // Also update RAM
+                    rx_frame_complete <= 1'b1;     // Signal frame complete to main state machine
+                    rx_counter <= 8'h00;           // Reset counter for next frame
+                    rx_state <= RX_IDLE;           // Return to idle for next frame
+                end
+            end
+
+            //-------------------------------------------------------------
+            // RX_PARSE_FEATURES - Parse JVS feature/capability data
+            //-------------------------------------------------------------
+            if (rx_state == RX_PARSE_FEATURES) begin
+                // Parse feature data format: [func_code][param1][param2][param3] repeating, then 00
+                // copy_read_idx points to current function code position
+                if (copy_read_idx < (JVS_OVERHEAD + rx_buffer[JVS_LENGTH_POS]) && 
+                    copy_read_idx + JVS_FUNC_LENGTH - 1 < (JVS_OVERHEAD + rx_buffer[JVS_LENGTH_POS])) begin
+                    
+                    // Check for terminator (00 byte)
+                    if (rx_buffer[copy_read_idx] == 8'h00) begin
+                        // Feature parsing complete
+                        rx_frame_complete <= 1'b1;
+                        rx_counter <= 8'h00;
+                        rx_state <= RX_IDLE;
+                    end else begin
+                        // Parse function block [func_code][param1][param2][param3]
+                        case (rx_buffer[copy_read_idx])
+                            //=========================================================
+                            // INPUT FUNCTIONS (0x01 - 0x07)
+                            //=========================================================
+                            
+                            FUNC_INPUT_DIGITAL: begin // 0x01
+                                // Digital input: param1=players, param2=buttons config
+                                jvs_nodes_r.node_players[current_device_addr - 1] <= rx_buffer[copy_read_idx + 1][3:0];
+                                jvs_nodes_r.node_buttons[current_device_addr - 1] <= rx_buffer[copy_read_idx + 2];
+                            end
+                            
+                            FUNC_INPUT_COIN: begin // 0x02
+                                // Coin input: param1=number of coin slots
+                                jvs_nodes_r.node_coin_slots[current_device_addr - 1] <= rx_buffer[copy_read_idx + 1][3:0];
+                            end
+                            
+                            FUNC_INPUT_ANALOG: begin // 0x03
+                                // Analog input: param1=number of channels, param2=bits of precision
+                                jvs_nodes_r.node_analog_channels[current_device_addr - 1] <= rx_buffer[copy_read_idx + 1][3:0];
+                                jvs_nodes_r.node_analog_bits[current_device_addr - 1] <= rx_buffer[copy_read_idx + 2];
+                            end
+                            
+                            FUNC_INPUT_ROTARY: begin // 0x04
+                                // Rotary input: param1=number of channels
+                                jvs_nodes_r.node_rotary_channels[current_device_addr - 1] <= rx_buffer[copy_read_idx + 1][3:0];
+                            end
+                            
+                            FUNC_INPUT_KEYCODE: begin // 0x05
+                                // Keycode input function - PARSED BUT NOT SUPPORTED YET
+                                // Parameters: 0, 0, 0 (no parameters according to JVS spec)
+                                jvs_nodes_r.node_has_keycode_input[current_device_addr - 1] <= 1'b1;
+                            end
+                            
+                            FUNC_INPUT_SCREEN_POS: begin // 0x06
+                                // Screen position input (touch/lightgun) - PARSED AND SUPPORTED
+                                // Parameters: Xbits, Ybits, channels (resolution only, not position)
+                                jvs_nodes_r.node_has_screen_pos[current_device_addr - 1] <= 1'b1;
+                                jvs_nodes_r.node_screen_pos_x_bits[current_device_addr - 1] <= rx_buffer[copy_read_idx + 1];
+                                jvs_nodes_r.node_screen_pos_y_bits[current_device_addr - 1] <= rx_buffer[copy_read_idx + 2];
+                                // Set has_screen_pos for any device that supports screen position
+                                has_screen_pos <= 1'b1;
+                            end
+                            
+                            FUNC_INPUT_MISC_DIGITAL: begin // 0x07
+                                // Miscellaneous digital input - PARSED BUT NOT SUPPORTED YET
+                                // Parameters: SW MSB, SW LSB, 0 (16-bit switch count)
+                                jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1] <= {rx_buffer[copy_read_idx + 1], rx_buffer[copy_read_idx + 2]};
+                            end
+                            
+                            //=========================================================
+                            // OUTPUT FUNCTIONS (0x10 - 0x15)
+                            //=========================================================
+                            
+                            FUNC_OUTPUT_CARD: begin // 0x10
+                                // Card system output - PARSED BUT NOT SUPPORTED YET
+                                jvs_nodes_r.node_card_system_slots[current_device_addr - 1] <= rx_buffer[copy_read_idx + 1];
+                            end
+                            
+                            FUNC_OUTPUT_HOPPER: begin // 0x11
+                                // Medal hopper output - PARSED BUT NOT SUPPORTED YET
+                                jvs_nodes_r.node_medal_hopper_channels[current_device_addr - 1] <= rx_buffer[copy_read_idx + 1];
+                            end
+                            
+                            FUNC_OUTPUT_DIGITAL: begin // 0x12
+                                // Digital output: param1=number of outputs
+                                jvs_nodes_r.node_digital_outputs[current_device_addr - 1] <= rx_buffer[copy_read_idx + 1];
+                            end
+                            
+                            FUNC_OUTPUT_ANALOG: begin // 0x13
+                                // Analog output: param1=number of channels
+                                jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] <= rx_buffer[copy_read_idx + 1][3:0];
+                            end
+                            
+                            FUNC_OUTPUT_CHAR: begin // 0x14
+                                // Character/text display output - PARSED BUT NOT SUPPORTED YET
+                                // Parameters: width, height, type
+                                jvs_nodes_r.node_has_char_display[current_device_addr - 1] <= 1'b1;
+                                jvs_nodes_r.node_char_display_width[current_device_addr - 1] <= rx_buffer[copy_read_idx + 1];
+                                jvs_nodes_r.node_char_display_height[current_device_addr - 1] <= rx_buffer[copy_read_idx + 2];
+                                jvs_nodes_r.node_char_display_type[current_device_addr - 1] <= rx_buffer[copy_read_idx + 3];
+                            end
+                            
+                            FUNC_OUTPUT_BACKUP: begin // 0x15
+                                // Backup data function - PARSED BUT NOT SUPPORTED YET
+                                jvs_nodes_r.node_has_backup[current_device_addr - 1] <= 1'b1;
+                            end
+                            
+                            default: begin
+                                // Unknown function code, skip it
+                            end
+                        endcase
+                        
+                        // Advance to next function block (JVS_FUNC_LENGTH bytes per function)
+                        copy_read_idx <= copy_read_idx + JVS_FUNC_LENGTH;
+                    end
+                end else begin
+                    // Reached end of data, complete parsing
+                    rx_frame_complete <= 1'b1;
+                    rx_counter <= 8'h00;
+                    rx_state <= RX_IDLE;
+                end
+            end
+            
+            //-------------------------------------------------------------
+            // RX INPUT PARSING STATES - Parse input response data
+            //-------------------------------------------------------------
+            
+            // RX_PARSE_INPUTS_START - Initialize input response parsing
+            if (rx_state == RX_PARSE_INPUTS_START) begin
+                // Verify the response status byte (01 = success) 
+                if (rx_buffer[JVS_STATUS_POS] == STATUS_NORMAL) begin
+                    // Status is valid, start parsing from first report byte position
+                    copy_read_idx <= JVS_STATUS_POS + 1;  // Skip status byte, point to first report byte
+                    rx_state <= RX_PARSE_INPUTS_SWITCH;
+                end else begin
+                    // Invalid status, return to idle
+                    rx_frame_complete <= 1'b1;
+                    rx_counter <= 8'h00;
+                    rx_state <= RX_IDLE;
+                end
+            end
+            
+            // RX_PARSE_INPUTS_SWITCH - Parse switch inputs report and system byte
+            if (rx_state == RX_PARSE_INPUTS_SWITCH) begin
+                if (jvs_nodes.node_players[current_device_addr - 1] > 0) begin
+                    // Check SWINP report byte
+                    if (rx_buffer[copy_read_idx] != REPORT_NORMAL) begin
+                        // SWINP function failed, skip to next function
+                        copy_read_idx <= copy_read_idx + 1; // Skip failed report byte
+                        rx_state <= RX_PARSE_INPUTS_COIN;
+                    end else begin
+                        // SWINP report is normal, advance past report byte and system byte
+                        copy_read_idx <= copy_read_idx + 2; // Skip report byte + system byte, now points to first player data
+                        // Initialize player parsing
+                        current_player <= 4'd0; // Start with player 0
+                        rx_state <= RX_PARSE_SWINP_PLAYER; // Go to player parsing state
+                    end
+                end else begin
+                    rx_state <= RX_PARSE_INPUTS_COIN;
+                end
+            end
+            
+            // RX_PARSE_SWINP_PLAYER - Parse individual player SWINP data (recursive)
+            if (rx_state == RX_PARSE_SWINP_PLAYER) begin
+                // Parse current player data
+                // @TODO: require chained JVS node support then use jvs_nodes.node_players[current_device_addr - 1] 
+                //        and current_device_addr to expand player 3,4 and above to other nodes
+                case (current_player)
+                    4'd0: begin // Player 1
+                        // First player data byte
+                        p1_btn_state[15] <= rx_buffer[copy_read_idx][7];  // START  
+                        p1_btn_state[14] <= rx_buffer[copy_read_idx][6];  // SELECT/SERVICE
+                        p1_btn_state[0]  <= rx_buffer[copy_read_idx][5];  // UP
+                        p1_btn_state[1]  <= rx_buffer[copy_read_idx][4];  // DOWN  
+                        p1_btn_state[2]  <= rx_buffer[copy_read_idx][3];  // LEFT
+                        p1_btn_state[3]  <= rx_buffer[copy_read_idx][2];  // RIGHT
+                        p1_btn_state[4]  <= rx_buffer[copy_read_idx][1];  // A (push1)
+                        p1_btn_state[5]  <= rx_buffer[copy_read_idx][0];  // B (push2)
+                        
+                        
+                        // Second player data byte if available (additional buttons)
+                        if (jvs_nodes.node_buttons[current_device_addr - 1] > 8) begin
+                            p1_btn_state[6] <= rx_buffer[copy_read_idx + 1][7];  // X (push3)
+                            p1_btn_state[7] <= rx_buffer[copy_read_idx + 1][6];  // Y (push4)
+                            p1_btn_state[8] <= rx_buffer[copy_read_idx + 1][5];   // push5 -> L1
+                            p1_btn_state[9] <= rx_buffer[copy_read_idx + 1][4];   // push6 -> R1
+                            p1_btn_state[10] <= rx_buffer[copy_read_idx + 1][3];  // push7 -> L2  
+                            p1_btn_state[11] <= rx_buffer[copy_read_idx + 1][2];  // push8 -> R2
+                            p1_btn_state[12] <= rx_buffer[copy_read_idx + 1][1];  // push9 -> L3
+                            p1_btn_state[13] <= rx_buffer[copy_read_idx + 1][0];  // push10 -> R3
+                        end else begin
+                            p1_btn_state[13:6] <= 8'b00000000;
+                        end
+                    end
+                    
+                    4'd1: begin // Player 2
+                        p2_btn_state[15] <= rx_buffer[copy_read_idx][7];  // P2 START  
+                        p2_btn_state[14] <= rx_buffer[copy_read_idx][6];  // P2 SELECT
+                        p2_btn_state[0]  <= rx_buffer[copy_read_idx][5];  // P2 UP
+                        p2_btn_state[1]  <= rx_buffer[copy_read_idx][4];  // P2 DOWN  
+                        p2_btn_state[2]  <= rx_buffer[copy_read_idx][3];  // P2 LEFT
+                        p2_btn_state[3]  <= rx_buffer[copy_read_idx][2];  // P2 RIGHT
+                        p2_btn_state[4]  <= rx_buffer[copy_read_idx][1];  // P2 A
+                        p2_btn_state[5]  <= rx_buffer[copy_read_idx][0];  // P2 B
+                        
+                        if (jvs_nodes.node_buttons[current_device_addr - 1] > 8) begin
+                            p2_btn_state[6] <= rx_buffer[copy_read_idx + 1][6];  // P2 X
+                            p2_btn_state[7] <= rx_buffer[copy_read_idx + 1][5];  // P2 Y
+                            p2_btn_state[8] <= rx_buffer[copy_read_idx + 1][4];  // P2 L1
+                            p2_btn_state[9] <= rx_buffer[copy_read_idx + 1][3];  // P2 R1
+                            p2_btn_state[10] <= rx_buffer[copy_read_idx + 1][2]; // P2 L2
+                            p2_btn_state[11] <= rx_buffer[copy_read_idx + 1][1]; // P2 R2
+                        end else begin
+                            p2_btn_state[11:6] <= 6'b000000;
+                        end
+                        p2_btn_state[13:12] <= 2'b00;
                     end
                     
                     default: begin
-                        // For other commands (IOIDENT, FEATCHK, etc.), acknowledge receipt
-                        // Full parsing implementation will be added in future updates
+                        // Player 3+ not supported yet, clear states  
                     end
                 endcase
                 
-                // Handle chained commands by advancing to next command
-                if (com_src_cmd_count > 1) begin
-                    com_src_cmd_next <= 1'b1;
+                // Advance to next player
+                copy_read_idx <= copy_read_idx + ((jvs_nodes.node_buttons[current_device_addr - 1] + 7) / 8);
+                current_player <= current_player + 1;
+                
+                // Check if done with all players
+                if (current_player + 1 >= jvs_nodes.node_players[current_device_addr - 1]) begin
+                    rx_state <= RX_PARSE_INPUTS_COIN; // All players processed, go to next function
                 end
+                // else stay in RX_PARSE_SWINP_PLAYER for next player
+            end
+            
+            // RX_PARSE_INPUTS_COIN - Parse coin inputs data  
+            if (rx_state == RX_PARSE_INPUTS_COIN) begin
+                if (jvs_nodes.node_coin_slots[current_device_addr - 1] > 0) begin
+                    // Check COININP report byte
+                    if (rx_buffer[copy_read_idx] != REPORT_NORMAL) begin
+                        // COININP function failed, skip to next function
+                        copy_read_idx <= copy_read_idx + 1; // Skip failed report byte
+                        rx_state <= RX_PARSE_INPUTS_ANALOG;
+                    end else begin
+                        // COININP report is normal, advance past report byte
+                        copy_read_idx <= copy_read_idx + 1 + (jvs_nodes.node_coin_slots[current_device_addr - 1] * 2);; // Skip report byte and coin data
+                        
+                        // @TODO: ADD sub coin parsing state
+                        // @TODO: report COIN INCREASE to a coin output
+                        /*
+                        // Parse coin data (2 bytes per coin slot)
+                        // Format: [condition(2 bits) counter_MSB(6 bits)] [counter_LSB]
+                        logic [1:0] coin_condition;
+                        logic [5:0] counter_msb;
+                        logic [7:0] counter_lsb;
+                        logic [13:0] coin_counter; // 14-bit coin counter (6+8 bits)
+                        
+                        // Parse first coin slot data (can be extended for multiple slots)
+                        coin_condition = rx_buffer[copy_read_idx][7:6];        // Top 2 bits = condition
+                        counter_msb = rx_buffer[copy_read_idx][5:0];           // Bottom 6 bits = counter MSB
+                        counter_lsb = rx_buffer[copy_read_idx + 1];            // Next byte = counter LSB
+                        coin_counter = {counter_msb, counter_lsb};             // Combine into 14-bit counter
+                        
+                        // Check coin condition and handle accordingly
+                        case (coin_condition)
+                            COIN_CONDITION_NORMAL: begin
+                                // Normal operation - coin counter is valid
+                                // TODO: Store/use coin_counter value if needed
+                            end
+                            COIN_CONDITION_JAM: begin
+                                // Coin jam detected - counter may not be accurate
+                                // TODO: Handle jam condition (display warning, etc.)
+                            end  
+                            COIN_CONDITION_DISCONNECTED: begin
+                                // Coin mechanism disconnected - counter invalid
+                                // TODO: Handle disconnection (disable coin features)
+                            end
+                            COIN_CONDITION_BUSY: begin
+                                // Coin mechanism busy - temporary state
+                                // TODO: Handle busy state (retry later, etc.)
+                            end
+                        endcase
+                        */
+                    end
+                end
+                rx_state <= RX_PARSE_INPUTS_ANALOG;
+            end
+            
+            // RX_PARSE_INPUTS_ANALOG - Parse analog inputs data // 01
+            if (rx_state == RX_PARSE_INPUTS_ANALOG) begin
+                if (jvs_nodes.node_analog_channels[current_device_addr - 1] > 0) begin
+                    // Check ANLINP report byte
+                    if (rx_buffer[copy_read_idx] != REPORT_NORMAL) begin
+                        // ANLINP function failed, skip to next function
+                        copy_read_idx <= copy_read_idx + 1; // Skip failed report byte
+                        rx_state <= RX_PARSE_INPUTS_ROTARY;
+                    end else begin // 01
+                        // ANLINP report is normal, advance past report byte
+                        copy_read_idx <= copy_read_idx + 1; // Skip report byte and point to analog channel values
+                        p1_joy_state <= 32'h00000000;
+                        p1_analog_x_24bit <= 24'h000000;
+                        p1_analog_y_24bit <= 24'h000000;
+                        current_channel <= 4'd0;
+                        rx_state <= RX_PARSE_INPUTS_ANALOG_DATA;
+                    end
+                end else begin
+                    rx_state <= RX_PARSE_INPUTS_ROTARY;
+                end
+            end
+            
+            if (rx_state == RX_PARSE_INPUTS_ANALOG_DATA) begin   // Ch1:4600 Ch2:4540 Ch3:4480 Ch4:44C0 Ch5:4580 Ch6:4440 Ch7:43C0 ch8:4440
+                // Parse analog input data (2 bytes per channel in 16-bit format)
+                case (current_channel)
+                    4'd0: begin // Channel 1
+                        if (jvs_nodes.node_players[current_device_addr - 1] == 1) begin
+                            p1_joy_state[31:20] <= ~{rx_buffer[copy_read_idx],rx_buffer[copy_read_idx + 1][7:4]};
+                        end else begin
+                            p1_joy_state[31:24] <= rx_buffer[copy_read_idx];
+                            p1_joy_state[23:16] <= rx_buffer[copy_read_idx + 1];
+                        end
+                    end
+                    4'd1: begin // Channel 2
+                        if (jvs_nodes.node_players[current_device_addr - 1] == 1) begin
+                            p1_joy_state[15:4] <= {rx_buffer[copy_read_idx],rx_buffer[copy_read_idx + 1][7:4]};
+                        end else begin
+                            p1_joy_state[15:8] <= rx_buffer[copy_read_idx];
+                            p1_joy_state[7:0] <= rx_buffer[copy_read_idx + 1];
+                        end
+                    end
+                    4'd2: begin // Channel 3
+                        if (jvs_nodes.node_players[current_device_addr - 1] == 1) begin
+                            // Channel 3: 12-bit MSBs -> X axis LSB [11:0]
+                        end else begin
+                            p2_joy_state[31:24] <= rx_buffer[copy_read_idx];
+                            p2_joy_state[23:16] <= rx_buffer[copy_read_idx + 1];
+                        end
+                    end
+                    4'd3: begin // Channel 4
+                        if (jvs_nodes.node_players[current_device_addr - 1] == 1) begin
+                            // Channel 4: 12-bit MSBs -> Y axis LSB [11:0]
+                        end else begin
+                            p2_joy_state[15:8] <= rx_buffer[copy_read_idx];
+                            p2_joy_state[7:0] <= rx_buffer[copy_read_idx + 1];
+                        end
+                    end
+                    4'd4: begin // Channel 5
+                    end
+                    4'd5: begin // Channel 6
+                    end
+                    4'd6: begin // Channel 7
+                    end
+                    4'd7: begin // Channel 8
+                    end
+                    default: begin
+                    end
+                endcase
+                // Advance read index past all analog data (2 bytes per channel)
+                copy_read_idx <= copy_read_idx + 2;
+                current_channel <= current_channel + 1;
+                if (current_channel + 1 >= jvs_nodes.node_analog_channels[current_device_addr - 1]) begin
+                    rx_state <= RX_PARSE_INPUTS_ROTARY; // All channels processed, go to next function
+                end
+                // else stay in RX_PARSE_INPUTS_ANALOG_DATA for next channel
+            end
+
+            // RX_PARSE_INPUTS_ROTARY - Parse rotary inputs data
+            if (rx_state == RX_PARSE_INPUTS_ROTARY) begin
+                if (jvs_nodes.node_rotary_channels[current_device_addr - 1] > 0) begin
+                    // Parse rotary encoder data (2 bytes per channel)
+                    // For now, we just advance past the rotary data without processing it
+                    // TODO: Implement rotary encoder processing if needed
+                    copy_read_idx <= copy_read_idx + (jvs_nodes.node_rotary_channels[current_device_addr - 1] * 2);
+                end
+                rx_state <= RX_PARSE_INPUTS_KEYCODE;
+            end
+            
+            // RX_PARSE_INPUTS_KEYCODE - Parse keycode inputs data
+            if (rx_state == RX_PARSE_INPUTS_KEYCODE) begin
+                if (jvs_nodes.node_has_keycode_input[current_device_addr - 1]) begin
+                    // Check KEYINP report byte
+                    if (rx_buffer[copy_read_idx] != REPORT_NORMAL) begin
+                        // KEYINP function failed, skip to next function
+                        copy_read_idx <= copy_read_idx + 1; // Skip failed report byte
+                        rx_state <= RX_PARSE_INPUTS_SCREEN_POS;
+                    end else begin
+                        // KEYINP report is normal, advance past report byte
+                        copy_read_idx <= copy_read_idx + 1; // Skip report byte
+                        
+                        if (jvs_nodes.node_has_keycode_input[current_device_addr - 1]) begin
+                            // Parse keycode input data
+                            // Keycode input format: variable length depending on device
+                            // For now, we just advance past the keycode data without processing it
+                            // TODO: Implement keycode processing if needed
+                            // Assuming 1 byte for simplicity, adjust if needed based on device specs
+                            copy_read_idx <= copy_read_idx + 1;
+                        end
+                    end
+                end
+                rx_state <= RX_PARSE_INPUTS_SCREEN_POS;
+            end
+            
+            // RX_PARSE_INPUTS_SCREEN_POS - Parse screen position inputs data
+            if (rx_state == RX_PARSE_INPUTS_SCREEN_POS) begin
+                if (jvs_nodes.node_has_screen_pos[current_device_addr - 1]) begin
+                    // Check SCRPOSINP report byte
+                    if (rx_buffer[copy_read_idx] != REPORT_NORMAL) begin
+                        // SCRPOSINP function failed, skip to next function
+                        copy_read_idx <= copy_read_idx + 1; // Skip failed report byte
+                        rx_state <= RX_PARSE_INPUTS_MISC_DIGITAL;
+                    end else begin
+                        // SCRPOSINP report is normal, advance past report byte
+                        copy_read_idx <= copy_read_idx + 1; // Skip report byte
+                        // Parse screen position data
+                        // Screen position format: Always 4 bytes = X_MSB, X_LSB, Y_MSB, Y_LSB (per JVS spec)
+                        screen_pos_x <= {rx_buffer[copy_read_idx], rx_buffer[copy_read_idx + 1]};
+                        screen_pos_y <= {rx_buffer[copy_read_idx + 2], rx_buffer[copy_read_idx + 3]};
+                        copy_read_idx <= copy_read_idx + 4; // Fixed 4 bytes per JVS specification
+                    end
+                end
+                rx_state <= RX_PARSE_INPUTS_MISC_DIGITAL;
+            end
+            
+            // RX_PARSE_INPUTS_MISC_DIGITAL - Parse misc digital inputs data
+            if (rx_state == RX_PARSE_INPUTS_MISC_DIGITAL) begin
+                if (jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] > 0) begin
+                    // Check MISCSWINP report byte
+                    if (rx_buffer[copy_read_idx] != REPORT_NORMAL) begin
+                        // MISCSWINP function failed, skip to complete
+                        copy_read_idx <= copy_read_idx + 1; // Skip failed report byte
+                        rx_state <= RX_PARSE_INPUTS_COMPLETE;
+                    end else begin
+                        // MISCSWINP report is normal, advance past report byte
+                        copy_read_idx <= copy_read_idx + 1 + ((jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] + 7) / 8);; // Skip report byte and data
+                        // Parse misc digital input data
+                        // Calculate bytes needed for misc digital inputs (inline calculation)
+                        // For now, we just advance past the misc digital data without processing it
+                        // TODO: Implement misc digital input processing if needed with substate
+                    end
+                end
+                rx_state <= RX_PARSE_INPUTS_COMPLETE;
+            end
+            
+            // RX_PARSE_OUTPUT_DIGITAL - Parse misc digital inputs data
+            if (rx_state == RX_PARSE_OUTPUT_DIGITAL) begin
+                if (jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] > 0) begin
+                    if (jvs_nodes.node_players[current_device_addr - 1] == 1) begin
+                        // Check MISCSWINP report byte
+                        if (rx_buffer[copy_read_idx] != REPORT_NORMAL) begin
+                            // MISCSWINP function failed, skip to complete
+                            copy_read_idx <= copy_read_idx + 1; // Skip failed report byte
+                            rx_state <= RX_PARSE_INPUTS_COMPLETE;
+                        end else begin
+                            // MISCSWINP report is normal, advance past report byte
+                            copy_read_idx <= copy_read_idx + 1 + ((jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] + 7) / 8);; // Skip report byte and data
+                            // Parse misc digital input data
+                            // Calculate bytes needed for misc digital inputs (inline calculation)
+                            // For now, we just advance past the misc digital data without processing it
+                            // TODO: Implement misc digital input processing if needed with substate
+                        end
+                    end
+                end
+                rx_state <= RX_PARSE_INPUTS_COMPLETE;
+            end
+
+            // RX_PARSE_INPUTS_COMPLETE - Complete parsing and return to idle
+            if (rx_state == RX_PARSE_INPUTS_COMPLETE) begin
+                // Input processing complete, signal completion
+                jvs_data_ready_joy <= 1'b1; // Indicate new input data available
+                rx_frame_complete <= 1'b1;
+                rx_counter <= 8'h00;
+                rx_state <= RX_IDLE;
+            end
+
+            //-------------------------------------------------------------
+            // RX_PROCESS - Process complete valid frames
+            //-------------------------------------------------------------
+            if (rx_state == RX_PROCESS) begin
+                // Process responses based on the last command sent
+                case (last_tx_state)
+                    STATE_SEND_READID: begin
+                        // Process READID response: E0 00 XX 01 01 [ASCII_NAME] 00 checksum
+                        // Example: "namco ltd.;NAJV2;Ver1.00;JPN,Multipurpose."
+                        if (rx_buffer[JVS_ADDR_POS] == JVS_HOST_ADDR && rx_buffer[JVS_STATUS_POS] == STATUS_NORMAL && rx_buffer[JVS_LENGTH_POS] >= 4) begin
+                            // Trigger name copying for current node (current_device_addr - 1 as array index)
+                            if (current_device_addr > 0 && current_device_addr <= jvs_node_info_pkg::MAX_JVS_NODES) begin
+                                // Setup name copying: rx_buffer format [E0][00][LEN][01][01][name...][00][checksum]
+                                copy_read_idx <= JVS_REPORT_POS + 1;    // Start after status and report bytes
+                                copy_write_idx <= 8'd0;                 // Start writing at beginning of name array
+                                rx_state <= RX_COPY_NAME;               // Switch to name copying state
+                            end
+                        end else begin
+                            // Invalid READID response, signal completion anyway
+                            rx_frame_complete <= 1'b1;
+                            rx_counter <= 8'h00;
+                            rx_state <= RX_IDLE;
+                        end
+                    end
+                    
+                    STATE_SEND_CMDREV: begin
+                        // Process CMDREV response: E0 00 XX 01 01 YY (where YY is revision in BCD)
+                        // Format: [sync][addr][len][status][report][data]
+                        // Current expected revision is 1.3, so YY should be 0x13
+                        if (rx_buffer[JVS_ADDR_POS] == JVS_HOST_ADDR && rx_buffer[JVS_STATUS_POS] == STATUS_NORMAL && rx_buffer[JVS_LENGTH_POS] >= 4) begin
+                            // Check report code for errors
+                            if (rx_buffer[JVS_REPORT_POS] == REPORT_NORMAL) begin
+                                // Store command revision for current node (current_device_addr - 1 as array index)
+                                if (current_device_addr > 0 && current_device_addr <= jvs_node_info_pkg::MAX_JVS_NODES) begin
+                                    jvs_nodes_r.node_cmd_ver[current_device_addr - 1] <= rx_buffer[JVS_DATA_START + 1]; // rx_buffer[5] contains revision
+                                end
+                            end
+                        end
+                        // Command processed, signal completion
+                        rx_frame_complete <= 1'b1;
+                        rx_counter <= 8'h00;
+                        rx_state <= RX_IDLE;
+                    end
+                    
+                    STATE_SEND_JVSREV: begin
+                        // Process JVSREV response: E0 00 XX 01 01 YY (where YY is JVS revision in BCD)
+                        // Format: [sync][addr][len][status][report][data]
+                        // Current expected revision is 3.0, so YY should be 0x30
+                        if (rx_buffer[JVS_ADDR_POS] == JVS_HOST_ADDR && rx_buffer[JVS_STATUS_POS] == STATUS_NORMAL && rx_buffer[JVS_LENGTH_POS] >= 4) begin
+                            // Check report code for errors
+                            if (rx_buffer[JVS_REPORT_POS] == REPORT_NORMAL) begin
+                                // Store JVS revision for current node (current_device_addr - 1 as array index)
+                                if (current_device_addr > 0 && current_device_addr <= jvs_node_info_pkg::MAX_JVS_NODES) begin
+                                    jvs_nodes_r.node_jvs_ver[current_device_addr - 1] <= rx_buffer[JVS_DATA_START + 1]; // rx_buffer[5] contains revision
+                                end
+                            end
+                        end
+                        // Command processed, signal completion
+                        rx_frame_complete <= 1'b1;
+                        rx_counter <= 8'h00;
+                        rx_state <= RX_IDLE;
+                    end
+                    
+                    STATE_SEND_COMMVER: begin
+                        // Process COMMVER response: E0 00 XX 01 01 YY (where YY is comm version in BCD)
+                        // Format: [sync][addr][len][status][report][data]
+                        // Current expected version is 1.0, so YY should be 0x10  
+                        if (rx_buffer[JVS_ADDR_POS] == JVS_HOST_ADDR && rx_buffer[JVS_STATUS_POS] == STATUS_NORMAL && rx_buffer[JVS_LENGTH_POS] >= 4) begin
+                            // Check report code for errors
+                            if (rx_buffer[JVS_REPORT_POS] == REPORT_NORMAL) begin
+                                // Store communication version for current node (current_device_addr - 1 as array index)
+                                if (current_device_addr > 0 && current_device_addr <= jvs_node_info_pkg::MAX_JVS_NODES) begin
+                                    jvs_nodes_r.node_com_ver[current_device_addr - 1] <= rx_buffer[JVS_DATA_START + 1]; // rx_buffer[5] contains version
+                                end
+                            end
+                        end
+                        // Command processed, signal completion
+                        rx_frame_complete <= 1'b1;
+                        rx_counter <= 8'h00;
+                        rx_state <= RX_IDLE;
+                    end
+                    
+                    STATE_SEND_FEATCHK: begin
+                        // Process FEATCHK response: E0 00 XX 01 01 [function_data...] 00
+                        // Format: [sync][addr][len][status][report][function_data...]
+                        // Contains 4-byte function descriptors followed by 00 terminator
+                        if (rx_buffer[JVS_ADDR_POS] == JVS_HOST_ADDR && rx_buffer[JVS_STATUS_POS] == STATUS_NORMAL && rx_buffer[JVS_LENGTH_POS] >= 4) begin
+                            // Check report code for errors
+                            if (rx_buffer[JVS_REPORT_POS] == REPORT_NORMAL) begin
+                                // Parse feature data - Format: [func_code][param1][param2][param3] repeating, then 00
+                                if (current_device_addr > 0 && current_device_addr <= jvs_node_info_pkg::MAX_JVS_NODES) begin
+                                    // Parse function blocks: start at JVS_DATA_START + 1 (after report byte)
+                                    copy_read_idx <= JVS_DATA_START + 1;  // Start after status and report bytes  
+                                    rx_state <= RX_PARSE_FEATURES;        // Switch to feature parsing state
+                                end
+                            end
+                        end else begin
+                            // Invalid or error response, signal completion anyway
+                            rx_frame_complete <= 1'b1;
+                            rx_counter <= 8'h00;
+                            rx_state <= RX_IDLE;
+                        end
+                    end
+                    
+                    STATE_SEND_INPUTS: begin
+                        // Process input data response  
+                        if (rx_buffer[JVS_ADDR_POS] == JVS_HOST_ADDR && rx_buffer[JVS_STATUS_POS] == STATUS_NORMAL) begin
+                            if (rx_buffer[JVS_REPORT_POS] == REPORT_NORMAL) begin
+                                // Start progressive input parsing in RX state machine
+                                copy_read_idx <= JVS_STATUS_POS + 1;  // Skip status byte
+                                rx_state <= RX_PARSE_INPUTS_START;    // Switch to input parsing state
+                            end else begin
+                                // Input read failed, signal completion
+                                rx_frame_complete <= 1'b1;
+                                rx_counter <= 8'h00;
+                                rx_state <= RX_IDLE;
+                            end
+                        end else begin
+                            // Invalid response, signal completion anyway
+                            rx_frame_complete <= 1'b1;
+                            rx_counter <= 8'h00;
+                            rx_state <= RX_IDLE;
+                        end
+                    end
+
+                    default: begin
+                        // For other commands (SETADDR, etc.), just acknowledge receipt
+                        // No special processing needed
+                        rx_frame_complete <= 1'b1;
+                        rx_counter <= 8'h00;
+                        rx_state <= RX_IDLE;
+                    end
+                endcase
             end
         end
     end
      
 endmodule
+
+//=============================================================================
+// END OF JVS CONTROLLER MODULE
+//=============================================================================
+
+/*
+USAGE NOTES:
+============
+
+1. Clock Frequency:
+   - Module is designed for 50MHz system clock
+   - UART baud rate automatically calculated as MASTER_CLK_FREQ / 115200
+   - UART modules has been modified from nandland to handle more than 256 cycles single bit time
+   - For different clock frequencies, adjust MASTER_CLK_FREQ parameter
+
+2. RS485 Hardware Requirements:
+   - External MAX485 or equivalent RS485 transceiver required
+   - Connect o_rx485_dir (SNAC_OUT2) to transceiver DE (Driver Enable) and /RE (Receiver Enable) pins (USB D+, the GREEN one)
+   - Connect SNAC_OUT1 to DI (USB D-, the WHITE one)
+   - Connect IN4 (USB 3.0 RX+, the YELLOW one from twisted pair on my cable) to RO.
+   - In a next release, an additional INPUT (IN7) will be required for JVS SENSE (to support chained JVS boards)
+
+3. JVS Device Compatibility:
+   - Tested with Namco Noir Cabinet JVS devices, will soon be tested on Viewlix.
+   - Should work with most standard JVS arcade systems
+   - Some devices may require timing adjustments
+
+4. Timing Considerations:
+   - Initial 5.4s delay ensures system stability
+   - 2s delay between RESET requests
+   - 10ms timeout prevents freeze on invalid frames
+
+6. Debugging:
+   - Monitor o_rx485_dir for transmission timing
+   - Monitor in the same time data on A or B.
+   - Check UART RX signals for communication issues
+
+7. Extensions:
+   - Additional players can be supported by extending frame parsing (up to 4 players)
+   - Light GUN can be supported (i have a HUUUUGGGEEE TIME CRISIS 4 cabinet for that)
+   - Steering wheel ca be supported (with force feeback ?) i have an Initial D 8 Inifinty cabinet too.
+   - More JVS commands can be added to command handling
+   - Configurable device addressing possible
+
+JVS FRAME ANALYSIS - ACTUAL CAPTURED TRACES:
+=============================================
+
+The following section documents the actual JVS communication traces captured 
+during development and testing with a Namco Noir cabinet. These real traces 
+has served as reference for current JVS protocol implementation.
+
+COMPLETE COMMUNICATION SEQUENCE:
+--------------------------------
+
+1. FIRST RESET COMMAND:
+   Raw: E0 FF 03 F0 D9 CB
+   Decode:
+   - E0: Sync byte (frame start)
+   - FF: Broadcast address (all devices)
+   - 03: Data length (3 bytes total)
+   - F0: Reset command byte 1
+   - D9: Reset command byte 2  
+   - CB: Checksum (FF+03+F0+D9 = 02CB, low byte = CB)
+
+2. SECOND RESET COMMAND:
+   Raw: E0 FF 03 F0 D9 CB
+   Decode: Identical to first reset (JVS specification requires double reset)
+
+3. SET ADDRESS COMMAND:
+   Raw: E0 FF 03 F1 01 F4
+   Decode:
+   - E0: Sync byte
+   - FF: Broadcast address (for initial address assignment)
+   - 03: Data length
+   - F1: Set address command
+   - 01: Address to assign to device
+   - F4: Checksum (FF+03+F1+01 = 01F4, low byte = F4)
+
+4. SET ADDRESS RESPONSE (ACK):
+   Raw: E0 00 03 01 01 05
+   Decode:
+   - E0: Sync byte
+   - 00: Master address (device responding to master)
+   - 03: Data length
+   - 01: Status byte (01 = normal/success)
+   - 01: Report data (address accepted)
+   - 05: Checksum (00+03+01+01 = 05)
+
+5. UNKNOWN COMMAND:
+   Raw: E0 01 04 11 12 13 3B
+   Decode:
+   - E0: Sync byte
+   - 01: Device address
+   - 04: Data length
+   - 11: Unknown command (possibly device-specific)
+   - 12 13: Unknown parameters
+   - 3B: Checksum (01+04+11+12+13 = 3B)
+
+6. UNKNOWN COMMAND RESPONSE:
+   Raw: E0 00 08 01 01 13 01 30 01 10 5F
+   Decode:
+   - E0: Sync byte
+   - 00: Master address
+   - 08: Data length (8 bytes)
+   - 01: Status (normal)
+   - 01 13 01 30 01 10: Unknown response data
+   - 5F: Checksum
+
+7. READ ID COMMAND:
+   Raw: E0 01 02 10 13
+   Decode:
+   - E0: Sync byte
+   - 01: Device address
+   - 02: Data length
+   - 10: Read device ID command
+   - 13: Checksum (01+02+10 = 13)
+
+8. READ ID RESPONSE:
+   Raw: E0 00 2E 01 01 6E 61 6D 63 6F 20 6C 74 64 2E 3B 4E 41 4A 56 32 3B 56 65 72 31 2E 30 30 3B 4A 50 4E 2C 4D 75 6C 74 69 70 75 72 70 6F 73 65 2E 00 29
+   Decode:
+   - E0: Sync byte
+   - 00: Master address
+   - 2E: Data length (46 bytes)
+   - 01: Status (normal)
+   - 01: Report follows
+   - ASCII String: "namco ltd.;NAJV2;Ver1.00;JPN,Multipurpose."
+     6E 61 6D 63 6F 20 6C 74 64 2E 3B = "namco ltd.;"
+     4E 41 4A 56 32 3B = "NAJV2;"
+     56 65 72 31 2E 30 30 3B = "Ver1.00;"
+     4A 50 4E 2C 4D 75 6C 74 69 70 75 72 70 6F 73 65 2E = "JPN,Multipurpose."
+   - 00: String terminator
+   - 29: Checksum
+
+9. CAPABILITIES COMMAND:
+   Raw: E0 01 02 14 17
+   Decode:
+   - E0: Sync byte
+   - 01: Device address
+   - 02: Data length
+   - 14: Get capabilities command
+   - 17: Checksum (01+02+14 = 17)
+
+10. CAPABILITIES RESPONSE:
+    Raw: E0 00 18 01 01 01 02 0D 00 02 02 00 00 03 08 10 00 12 12 00 00 13 02 00 00 00 82
+    Decode:
+    - E0: Sync byte
+    - 00: Master address
+    - 18: Data length (24 bytes)
+    - 01: Status (normal)
+    - 01: Report follows
+    - Capabilities data:
+      01: Input function (digital inputs)
+      02: Number of players supported (2)
+      0D: Button configuration
+      00: Reserved
+      02: Input function (analog inputs)
+      02: Number of analog channels
+      00 00: Reserved
+      03: Input function (rotary encoders)
+      08: Number of rotary channels
+      10 00: Rotary configuration
+      12: Input function (keypad)
+      12: Keypad configuration
+      00 00: Reserved
+      13: Input function (lightgun)
+      02: Number of lightgun inputs
+      00 00 00: Reserved
+    - 82: Checksum
+
+11. DEVICE INFORMATION COMMAND:
+    Raw: E0 01 1C 15 4E 42 47 49 2E 3B 57 69 6E 41 72 63 3B 56 65 72 32 2E 31 3B 4A 50 4E 00 7A
+    Decode:
+    - E0: Sync byte
+    - 01: Device address
+    - 1C: Data length (28 bytes)
+    - 15: Device information command
+    - ASCII String: "NBGI.;WinArc;Ver2.1;JPN"
+      4E 42 47 49 2E 3B = "NBGI.;"
+      57 69 6E 41 72 63 3B = "WinArc;"
+      56 65 72 32 2E 31 3B = "Ver2.1;"
+      4A 50 4E = "JPN"
+    - 00: String terminator
+    - 7A: Checksum
+
+12. DEVICE INFO ACK:
+    Raw: E0 00 03 01 01 05
+    Decode: Same format as SET ADDRESS response (acknowledgment)
+
+13. READ INPUTS COMMAND:
+    Raw: E0 01 12 20 02 02 21 01 22 06 32 02 00 00 33 02 00 00 00 00 EA
+    Decode:
+    - E0: Sync byte
+    - 01: Device address
+    - 12: Data length (18 bytes)
+    - 20: Read inputs command
+    - 02: Number of players (2)
+    - 02: Bytes per player (2 bytes each)
+    - 21: Coin input command
+    - 01: Player 1 button byte request
+    - 22: Player 2 system/direction byte request
+    - 06: Player 2 button byte request
+    - 32: Analog channel 1 request
+    - 02: 2 bytes of analog data requested
+    - 00 00: Analog channel 1 default values
+    - 33: Analog channel 2 request
+    - 02: 2 bytes of analog data requested
+    - 00 00: Analog channel 2 default values
+    - 00 00: Padding
+    - EA: Checksum
+
+14. READ INPUTS RESPONSE (no buttons pressed):
+    Raw: E0 00 1A 01 01 00 00 00 00 00 01 00 00 01 B5 00 B4 40 B3 C0 B2 80 B5 00 B4 80 01 01 57
+    Decode:
+    - E0: Sync byte
+    - 00: Master address  
+    - 1A: Data length (26 bytes)
+    - 01: Status (normal)
+    - 01: Report data follows
+    - Button/Direction Data:
+      00: Player 1 buttons (all released)
+      00: Player 1 directions (centered/no input)
+      00: Player 2 buttons (all released)
+      00: Player 2 directions (centered/no input)
+      00: Additional system byte
+    - Analog Data Block:
+      01 00 00 01: Unknown format/header
+      B5 00: Analog channel data
+      B4 40: Analog channel data
+      B3 C0: Analog channel data
+      B2 80: Analog channel data (0x80 = center)
+      B5 00: Analog channel data
+      B4 80: Analog channel data (0x80 = center)
+      01 01: Status/footer
+    - 57: Checksum
+
+15. READ INPUTS COMMAND (variant):
+    Raw: E0 01 12 20 02 02 21 01 22 06 32 02 00 80 33 02 00 00 00 00 6A
+    Decode: Similar to #13 but with 80 in analog channel 1 (centered position)
+
+16. READ INPUTS RESPONSE (variant):
+
+CURRENT IMPLEMENTATION SEQUENCE:
+===============================
+
+The current implementation uses a simplified JVS sequence focused on input 
+polling rather than full protocol compliance. Make it work first then improve it.
+
+IMPLEMENTED COMMAND SEQUENCE:
+----------------------------
+
+1. FIRST RESET COMMAND (Implemented):
+   Sent: E0 FF 03 F0 D9 CB
+   - Full implementation matches captured trace
+   - 2 second delay after transmission
+   - No response expected (broadcast command)
+
+2. SECOND RESET COMMAND (Implemented):
+   Sent: E0 FF 03 F0 D9 CB
+   - Identical to first reset
+   - 500ms delay after transmission
+   - Ensures device is fully reset
+
+3. SET ADDRESS COMMAND (Implemented):
+   Sent: E0 FF 03 F1 01 F4
+   Expected Response: E0 00 03 01 01 05
+   - Waits for ACK response with 2s timeout
+   - On success: proceeds to READ ID
+   - On timeout: restarts reset sequence
+    ⚠️ Should rely on SENSE Line going low to know if all JVS boards are initialized, support only one board for now.
+
+4. READ ID COMMAND (Implemented):
+   Sent: E0 01 02 10 13
+   Expected Response: E0 00 2E 01 01 [ASCII_STRING] [checksum]
+   - Waits for device identification
+   - Response parsed but not used for device-specific logic
+   - On success: starts input polling loop
+
+5. READ INPUTS COMMAND (Implemented - Simplified):
+   Sent: E0 01 12 20 02 02 21 01 22 06 32 02 00 00 33 02 00 00 00 00 EA
+   Expected Response: E0 00 1A 01 01 [button_data] [analog_data] [checksum]
+   - Continuous 1ms polling for responsive gaming
+   - Only processes button/direction data at positions 6-9
+   - Analog data received but only basic X/Y sticks mapped
+   - 10ms timeout to prevent freeze on invalid frames
+   ⚠️Probably a Namco specific, on original hardware the topper light is controlled by JVS (blink when the game is loading).
+
+COMMANDS NOT IMPLEMENTED:
+------------------------
+
+The following commands from the full trace are NOT implemented in the current
+version, as they are not essential for basic gaming functionality:
+
+- Unknown Command (11 12 13): Device-specific, purpose unclear
+- Capabilities Command (14): Not needed for fixed input mapping  
+- Device Information Command (15): Additional device info not required
+
+CURRENT LIMITATIONS:
+-------------------
+
+1. Button Mapping Incomplete:
+   - Only basic D-PAD and face buttons mapped
+   - START/SELECT functional but may need position adjustment
+   - No support for additional buttons (L1/R1/L2/R2)
+   - Player 2 mapping present but not fully tested
+
+2. Analog Support Basic:
+   - Only first 4 analog channels mapped (2 sticks)
+   - Complex analog format from trace not fully decoded
+   - Centering works (0x80) but full range may need calibration
+
+3. Error Handling Simplified:
+   - 10ms timeout for all responses (vs proper command-specific timeouts)
+   - No retry logic for specific command failures
+   - Limited validation of response format
+
+4. Protocol Compliance Partial:
+   - Missing capabilities negotiation
+   - No device-specific optimizations
+   - Simplified frame validation
+
+4. Light gun not supported yet (can not wait to play Duck Hunt on my Time Crisis 4).
+
+5. Steering wheel not supported yet (can not wait to play OutRun with force feedback on my Initial D).
+
+FUTURE IMPROVEMENTS NEEDED:
+--------------------------
+
+1. Complete Button Mapping (only 4 buttons for now):
+
+2. Test and Validate Player 2 controls mapping
+
+2. Enhanced Analog Support:
+   - Decode complex analog format from real traces
+   - Implement proper calibration/centering
+   - Support additional analog channels if needed
+
+3. Robust Error Handling:
+   - Implement proper retry logic for failed commands
+   - Add device-specific timeout handling
+   - Improve frame validation and error recovery
+
+4. Protocol Completeness:
+   - Add capabilities negotiation for device compatibility
+   - Implement device information parsing
+   - Support additional JVS commands as needed
+
+DEVELOPMENT STATUS:
+------------------
+✅ Core Protocol: Working (Reset, Address, ID, Input polling)
+✅ Basic Buttons: Working (D-PAD, 4 Face buttons, START)
+✅ Basic Analog: Working (2 analog sticks with centering)
+✅ Escape Sequences: Working (D0 DF → E0, D0 CF → D0 decoding)
+✅ RS485 Timing: Working (Proper setup/hold times)
+✅ Performance: Optimized (1ms polling, 10ms timeouts)
+✅ FPGA Resources: Optimized with configurable buffer sizes (RX_BUFFER_SIZE, TX_BUFFER_SIZE)
+
+⚠️  Button Mapping: Needs verification (START position unclear)
+⚠️  Player 2: Present but not fully tested
+⚠️  Advanced Analog: Basic implementation only
+⚠️  Error Recovery: Simplified timeout handling
+
+❌ Capabilities: Not implemented
+❌ Device Info: Not used for logic
+❌ Extended Commands: Not supported
+❌ Multi-device: Single device only
+
+BUTTON MAPPING DISCOVERY:
+------------------------
+During development, the following button positions were empirically determined
+by pressing individual buttons and observing the bit changes:
+
+Physical Button -> JVS Data Position -> Analogue Pocket Mapping:
+START    -> rx_buffer[6][7] -> p1_btn_state[15]
+SELECT   -> rx_buffer[6][6] -> p1_btn_state[14]  
+Y        -> rx_buffer[7][5] -> p1_btn_state[7]
+X        -> rx_buffer[7][6] -> p1_btn_state[6]
+B        -> rx_buffer[6][0] -> p1_btn_state[5]
+A        -> rx_buffer[6][1] -> p1_btn_state[4]
+RIGHT    -> rx_buffer[6][2] -> p1_btn_state[3] (verified: 0x04 = bit 2)
+LEFT     -> rx_buffer[6][3] -> p1_btn_state[2] (verified: 0x08 = bit 3)
+DOWN     -> rx_buffer[6][4] -> p1_btn_state[1]
+UP       -> rx_buffer[6][5] -> p1_btn_state[0]
+
+TIMING ANALYSIS:
+---------------
+- JVS communication runs at 115200 baud (8N1)
+- RS485 setup time: 10µs before transmission
+- RS485 hold time: 30µs after transmission
+
+ERROR CONDITIONS OBSERVED:
+--------------------------
+- Checksum mismatch: Device ignores frame, no response
+- Invalid address: Device ignores frame, no response  
+- Timeout scenarios: 10ms timeout prevents system freeze
+- Cable disconnection: Continuous timeouts, system continues polling
+- Power cycle: Requires full reset sequence (double reset + addressing)
+
+PROTOCOL VARIATIONS:
+-------------------
+Different JVS devices may implement slight variations:
+- Some devices use different button bit positions
+- Analog resolution may vary (8-bit is standard)
+- Response timing can vary between manufacturers
+- Additional data fields for specialized controls (guns, wheels, etc.)
+
+*/
