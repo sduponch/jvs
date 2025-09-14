@@ -50,6 +50,7 @@ module jvs_com
     output reg [7:0]    rx_remaining,  // Bytes remaining (0 = current is last)
     output reg [7:0]    src_node,      // Source node of response
     output reg [7:0]    src_cmd,       // CMD from command FIFO
+    output reg [7:0]    src_cmd_status, // STATUS byte decoded from JVS response
     input  wire         src_cmd_next,  // Pulse to get next command from FIFO
     output reg [4:0]    src_cmd_count, // Number of commands available in FIFO
     output reg          rx_complete,   // Pulse when frame complete
@@ -97,6 +98,13 @@ module jvs_com
     localparam [7:0] JVS_ESCAPE     = 8'hD0;
     localparam [7:0] JVS_ESC_SYNC   = 8'hDF;  // D0 DF → E0
     localparam [7:0] JVS_ESC_ESC    = 8'hCF;  // D0 CF → D0
+
+    // Status Codes - General response status (position 3 in frame)
+    localparam STATUS_NORMAL = 8'h01;        // Normal operation status
+    localparam STATUS_UNKNOWN_CMD = 8'h02;   // Unknown command received
+    localparam STATUS_SUM_ERROR = 8'h03;     // Checksum error in received data
+    localparam STATUS_ACK_OVERFLOW = 8'h04;  // Acknowledgment overflow
+    localparam STATUS_BUSY = 8'h05;          // Device busy, cannot process command
     
     //////////////////////////////////////////////////////////////////////
     // Internal Registers and Wires
@@ -132,7 +140,7 @@ module jvs_com
     reg [4:0]   cmd_count;              // Number of commands in FIFO (5-bit for overflow detection)
     reg         cmd_fifo_init;          // Pulse to initialize command FIFO reading
     
-    // RX State Machine  
+    // RX State Machine
     reg [3:0]   rx_state;
     reg [7:0]   rx_data_idx;
     reg [7:0]   rx_checksum_calc;
@@ -142,6 +150,7 @@ module jvs_com
     reg [7:0]   rx_length_internal; // Internal length storage
     reg [7:0]   rx_buffer [0:255];  // Internal RX data buffer
     reg [7:0]   rx_read_idx;        // Current read index for rx_next interface
+    reg         rx_complete_pulse;  // One-cycle pulse for rx_complete
     
     // Internal frame buffers
     reg [7:0]   tx_frame_node;
@@ -249,6 +258,7 @@ module jvs_com
             cmd_write_ptr <= 0;
             cmd_read_ptr <= 0;
             cmd_count <= 0;
+            src_cmd_status <= 8'h00;  // No STATUS received yet
         end else begin
             // Handle data and command push - all managed in TX state machine
             
@@ -270,10 +280,14 @@ module jvs_com
             if (src_cmd_next && cmd_count > 0) begin
                 cmd_read_ptr <= cmd_read_ptr + 1;
                 cmd_count <= cmd_count - 1;
-                
+
                 // Update src_cmd with next command if available
+                // Use the incremented read pointer value (will be available next cycle)
                 if (cmd_count > 1) begin
                     src_cmd <= cmd_fifo[cmd_read_ptr + 1];
+                end else begin
+                    // No more commands available
+                    src_cmd <= 8'h00;  // Clear src_cmd when FIFO is empty
                 end
             end
         end
@@ -503,9 +517,10 @@ module jvs_com
             cmd_fifo_init <= 1'b0;
         end else begin
             rx_state_debug <= rx_state;
-            rx_complete <= 1'b0; // Default, pulse when frame complete
+            rx_complete <= rx_complete_pulse; // Connect to pulse register
             rx_error <= 1'b0; // Default
             cmd_fifo_init <= 1'b0; // Default, pulse when initializing command FIFO
+            rx_complete_pulse <= 1'b0; // Default pulse to 0
             
             if (uart_rx_valid) begin
                 case (rx_state)
@@ -517,7 +532,7 @@ module jvs_com
                             rx_state <= RX_NODE;
                         end
                     end
-                    
+
                     RX_NODE: begin
                         if (handle_escape_rx(uart_rx_data, rx_escape_mode, rx_byte_buffer)) begin
                             src_node <= rx_byte_buffer;
@@ -525,7 +540,7 @@ module jvs_com
                             rx_state <= RX_LENGTH;
                         end
                     end
-                    
+
                     RX_LENGTH: begin
                         if (handle_escape_rx(uart_rx_data, rx_escape_mode, rx_byte_buffer)) begin
                             rx_length_internal <= rx_byte_buffer;
@@ -534,10 +549,10 @@ module jvs_com
                             rx_state <= RX_DATA;
                         end
                     end
-                    
+
                     RX_DATA: begin
                         if (handle_escape_rx(uart_rx_data, rx_escape_mode, rx_byte_buffer)) begin
-                            if (rx_data_idx < rx_length_internal) begin
+                            if (rx_data_idx < rx_length_internal - 1) begin
                                 rx_buffer[rx_data_idx] <= rx_byte_buffer;
                                 rx_checksum_calc <= rx_checksum_calc + rx_byte_buffer;
                                 rx_data_idx <= rx_data_idx + 1;
@@ -547,28 +562,30 @@ module jvs_com
                             end
                         end
                     end
-                    
-                    RX_VALIDATE: begin
-                        if (rx_checksum_calc == rx_checksum_recv) begin
-                            frames_rx_count <= frames_rx_count + 1;
-                            
-                            // Initialize command FIFO reading - start with first command
-                            cmd_fifo_init <= 1'b1;
-                            
-                            // Setup sequential read interface
-                            rx_read_idx <= 0;
-                            rx_byte <= rx_buffer[0];  // First byte ready
-                            rx_remaining <= rx_length_internal - 1;
-                            rx_complete <= 1'b1;
-                        end else begin
-                            checksum_errors_count <= checksum_errors_count + 1;
-                            rx_error <= 1'b1;
-                        end
-                        rx_state <= RX_IDLE;
-                    end
-                    
+
                     default: rx_state <= RX_IDLE;
                 endcase
+            end
+
+            // RX_VALIDATE state - executes every cycle when in this state, not just when uart_rx_valid
+            if (rx_state == RX_VALIDATE) begin
+                if (rx_checksum_calc == rx_checksum_recv) begin
+                    frames_rx_count <= frames_rx_count + 1;
+
+                    // Initialize command FIFO reading - start with first command
+                    cmd_fifo_init <= 1'b1;
+
+                    // Setup sequential read interface - start from REPORT byte (skip STATUS)
+                    src_cmd_status <= rx_buffer[0];  // Store STATUS directly
+                    rx_read_idx <= 1;
+                    rx_byte <= rx_buffer[1];  // REPORT byte ready (STATUS already decoded)
+                    rx_remaining <= rx_length_internal - 2;
+                    rx_complete_pulse <= 1'b1;  // Generate one-cycle pulse
+                end else begin
+                    checksum_errors_count <= checksum_errors_count + 1;
+                    rx_error <= 1'b1;
+                end
+                rx_state <= RX_IDLE;
             end
         end
         
