@@ -7,7 +7,98 @@ on:
     branches: [ main ]
 
 jobs:
+  simulation-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        repository: RndMnkIII/JVS_Debugger
+        ref: jvs_submodule
+        path: JVS_Debugger
+        submodules: 'recursive'
+
+    - name: Update JVS submodule to main
+      run: |
+        cd JVS_Debugger/src/fpga/analogizer/jvs
+        git fetch origin
+        git checkout origin/main
+        cd ../../../..
+        echo "✅ JVS submodule updated to main branch"
+
+    - name: Install Quartus dependencies (includes ModelSim)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libc6-i386 lib32z1 lib32ncurses6 libbz2-1.0 libxext6 libxft2 libxi6 libxtst6
+
+    - name: Cache Quartus installation
+      uses: actions/cache@v4
+      id: quartus-cache
+      with:
+        path: |
+          ~/quartus
+          ~/downloadtmp
+        key: quartus-lite-24.1std-1077-${{ runner.os }}-cyclonev-modelsim
+        restore-keys: |
+          quartus-lite-24.1std-1077-${{ runner.os }}-
+
+    - name: Install Quartus Prime Lite (includes ModelSim)
+      if: steps.quartus-cache.outputs.cache-hit != 'true'
+      run: |
+        echo "⬇️ Cache miss - Installing Quartus Prime Lite..."
+
+        # Download and install Quartus Lite (includes ModelSim)
+        wget -q https://downloads.intel.com/akdlm/software/acdsinst/24.1std/1077/qinst/qinst-lite-linux-24.1std-1077.run
+        chmod +x qinst-lite-linux-24.1std-1077.run
+
+        # Extract and install Quartus only
+        ./qinst-lite-linux-24.1std-1077.run --accept --quiet --nox11 --target $HOME/quartus_temp -- --cli --download-dir ~/downloadtmp --install-dir ~/quartus --accept-eula --components quartus,cyclonev
+
+        # Install ModelSim separately
+        echo "📦 Installing ModelSim separately..."
+        wget -q https://downloads.intel.com/akdlm/software/acdsinst/20.1std.1/720/ib_installers/ModelSimSetup-20.1.1.720-linux.run
+        chmod +x ModelSimSetup-20.1.1.720-linux.run
+        ./ModelSimSetup-20.1.1.720-linux.run --mode unattended --installdir ~/quartus/modelsim_ase --accept_eula 1
+
+    - name: Setup Quartus environment (with ModelSim)
+      run: |
+        if [ "${{ steps.quartus-cache.outputs.cache-hit }}" == "true" ]; then
+          echo "✅ Cache hit - Using cached Quartus installation"
+        fi
+
+        # Set environment variables for Quartus and ModelSim
+        echo "QUARTUS_ROOTDIR=$HOME/quartus/quartus" >> $GITHUB_ENV
+        echo "PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$HOME/quartus/modelsim_ase/linuxaloem:$PATH" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib:$HOME/quartus/modelsim_ase/linuxaloem" >> $GITHUB_ENV
+
+    - name: Run JVS Simulation Tests
+      run: |
+        cd JVS_Debugger/src/fpga/analogizer/jvs/simu
+
+        # Verify ModelSim is working
+        echo "✅ Testing ModelSim installation..."
+        vsim -version || echo "Version check failed but continuing..."
+
+        # Run Test 03: Full JVS identification sequence
+        echo "🧪 Running Test 03: Full JVS identification..."
+        make test_03
+
+        echo "✅ JVS Test 03 completed successfully"
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: jvs-simulation-results
+        path: |
+          JVS_Debugger/src/fpga/analogizer/jvs/simu/*.vcd
+          JVS_Debugger/src/fpga/analogizer/jvs/simu/*.log
+          JVS_Debugger/src/fpga/analogizer/jvs/simu/work/
+        retention-days: 7
+
   quartus-build:
+    needs: simulation-tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,7 +134,7 @@ jobs:
         path: |
           ~/quartus
           ~/downloadtmp
-        key: quartus-lite-24.1std-1077-${{ runner.os }}-cyclonev
+        key: quartus-lite-24.1std-1077-${{ runner.os }}-cyclonev-modelsim
         restore-keys: |
           quartus-lite-24.1std-1077-${{ runner.os }}-
     
