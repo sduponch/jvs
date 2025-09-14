@@ -34,7 +34,7 @@ module jvs_com
     // UART Physical Interface
     input  wire         uart_rx,
     output wire         uart_tx,
-    output wire         uart_rts_n,    // RS485 transmit enable (active low)
+    output wire         o_rs485_dir,   // RS485 transmit enable (active high)
     
     // High-level Protocol Interface - TX Path
     input  wire [7:0]   tx_data,       // Data byte (CMD + args)
@@ -71,15 +71,16 @@ module jvs_com
     localparam JVS_CHECKSUM_SIZE = 1;      // Checksum is 1 byte
     
     // TX State Machine
-    localparam [3:0] TX_IDLE        = 4'h0;
-    localparam [3:0] TX_SETUP       = 4'h1;
-    localparam [3:0] TX_SYNC        = 4'h2;
-    localparam [3:0] TX_NODE        = 4'h3;
-    localparam [3:0] TX_LENGTH      = 4'h4;
-    localparam [3:0] TX_DATA        = 4'h5;
-    localparam [3:0] TX_CHECKSUM    = 4'h6;
-    localparam [3:0] TX_HOLD        = 4'h7;
-    localparam [3:0] TX_ESCAPE_WAIT = 4'h8;
+    localparam [3:0] TX_IDLE         = 4'h0;
+    localparam [3:0] TX_SETUP        = 4'h1;
+    localparam [3:0] TX_SYNC         = 4'h2;
+    localparam [3:0] TX_NODE         = 4'h3;
+    localparam [3:0] TX_LENGTH       = 4'h4;
+    localparam [3:0] TX_DATA         = 4'h5;
+    localparam [3:0] TX_CHECKSUM     = 4'h6;
+    localparam [3:0] TX_TRANSMIT_BYTE = 4'h7;
+    localparam [3:0] TX_TRANSMIT_BYTE_DONE = 4'h8;
+    localparam [3:0] TX_HOLD         = 4'h9;
     
     // RX State Machine
     localparam [3:0] RX_IDLE        = 4'h0;
@@ -102,7 +103,8 @@ module jvs_com
     //////////////////////////////////////////////////////////////////////
     
     // UART Interface
-    wire        uart_tx_ready;
+    wire        uart_tx_active;
+    wire        uart_tx_done;
     wire        uart_tx_valid;
     wire [7:0]  uart_tx_data;
     wire        uart_rx_valid;
@@ -110,6 +112,7 @@ module jvs_com
     
     // TX State Machine
     reg [3:0]   tx_state;
+    reg [3:0]   tx_next_state;      // État suivant après TX_TRANSMIT_BYTE
     reg [15:0]  tx_timer;
     reg [7:0]   tx_data_idx;
     reg [7:0]   tx_checksum;
@@ -182,9 +185,9 @@ module jvs_com
         .i_Clock(clk_sys),
         .i_Tx_DV(uart_tx_valid),
         .i_Tx_Byte(uart_tx_data),
-        .o_Tx_Active(),
+        .o_Tx_Active(uart_tx_active),
         .o_Tx_Serial(uart_tx),
-        .o_Tx_Done(uart_tx_ready)
+        .o_Tx_Done(uart_tx_done)
     );
     
     uart_rx #(
@@ -201,7 +204,7 @@ module jvs_com
     //////////////////////////////////////////////////////////////////////
     
     reg rs485_tx_enable;
-    assign uart_rts_n = ~rs485_tx_enable;
+    assign o_rs485_dir = rs485_tx_enable;
     
     //////////////////////////////////////////////////////////////////////
     // Checksum Calculation Function
@@ -228,10 +231,12 @@ module jvs_com
     // TX State Machine
     //////////////////////////////////////////////////////////////////////
     
-    reg uart_tx_start;
-    assign uart_tx_valid = uart_tx_start;
+    reg uart_tx_dv;
+    assign uart_tx_valid = uart_tx_dv;
     reg [7:0] uart_tx_byte;
     assign uart_tx_data = uart_tx_byte;
+
+    // uart_tx_active and uart_tx_done are now directly connected to UART module outputs
     
     //////////////////////////////////////////////////////////////////////
     // TX Data Buffer Management
@@ -281,9 +286,10 @@ module jvs_com
     always @(posedge clk_sys) begin
         if (reset) begin
             tx_state <= TX_IDLE;
+            tx_next_state <= TX_IDLE;
             tx_timer <= 0;
             rs485_tx_enable <= 1'b0;
-            uart_tx_start <= 1'b0;
+            uart_tx_dv <= 1'b0;
             tx_data_idx <= 0;
             tx_checksum <= 0;
             tx_escape_pending <= 1'b0;
@@ -296,7 +302,7 @@ module jvs_com
             tx_data_push_d <= 1'b0;
         end else begin
             tx_state_debug <= tx_state;
-            uart_tx_start <= 1'b0; // Default, pulse when needed
+            uart_tx_dv <= 1'b0; // Default, pulse when needed
             
             // Update edge detection registers
             tx_cmd_push_d <= tx_cmd_push;
@@ -345,116 +351,123 @@ module jvs_com
                 end
                 
                 TX_SYNC: begin
-                    if (uart_tx_ready) begin
-                        uart_tx_byte <= JVS_SYNC;
-                        uart_tx_start <= 1'b1;
-                        tx_state <= TX_NODE;
-                    end
+                    uart_tx_byte <= JVS_SYNC;
+                    tx_next_state <= TX_NODE;
+                    tx_state <= TX_TRANSMIT_BYTE;
                 end
                 
                 TX_NODE: begin
-                    if (uart_tx_ready && !uart_tx_start) begin
-                        if (needs_escape(tx_frame_node)) begin
-                            if (!tx_escape_pending) begin
-                                uart_tx_byte <= JVS_ESCAPE;
-                                uart_tx_start <= 1'b1;
-                                tx_escape_pending <= 1'b1;
-                                tx_escape_byte <= get_escape_byte(tx_frame_node);
-                            end else begin
-                                uart_tx_byte <= tx_escape_byte;
-                                uart_tx_start <= 1'b1;
-                                tx_escape_pending <= 1'b0;
-                                tx_checksum <= tx_checksum + tx_frame_node;
-                                tx_state <= TX_LENGTH;
-                            end
+                    if (needs_escape(tx_frame_node)) begin
+                        if (!tx_escape_pending) begin
+                            uart_tx_byte <= JVS_ESCAPE;
+                            tx_escape_pending <= 1'b1;
+                            tx_escape_byte <= get_escape_byte(tx_frame_node);
+                            tx_next_state <= TX_NODE;  // Revenir pour envoyer l'échappement
                         end else begin
-                            uart_tx_byte <= tx_frame_node;
-                            uart_tx_start <= 1'b1;
+                            uart_tx_byte <= tx_escape_byte;
+                            tx_escape_pending <= 1'b0;
                             tx_checksum <= tx_checksum + tx_frame_node;
-                            tx_state <= TX_LENGTH;
+                            tx_next_state <= TX_LENGTH;
                         end
+                    end else begin
+                        uart_tx_byte <= tx_frame_node;
+                        tx_checksum <= tx_checksum + tx_frame_node;
+                        tx_next_state <= TX_LENGTH;
                     end
+                    tx_state <= TX_TRANSMIT_BYTE;
                 end
                 
                 TX_LENGTH: begin
-                    if (uart_tx_ready && !uart_tx_start) begin
-                        if (needs_escape(tx_frame_length)) begin
-                            if (!tx_escape_pending) begin
-                                uart_tx_byte <= JVS_ESCAPE;
-                                uart_tx_start <= 1'b1;
-                                tx_escape_pending <= 1'b1;
-                                tx_escape_byte <= get_escape_byte(tx_frame_length);
-                            end else begin
-                                uart_tx_byte <= tx_escape_byte;
-                                uart_tx_start <= 1'b1;
-                                tx_escape_pending <= 1'b0;
-                                tx_checksum <= tx_checksum + tx_frame_length;
-                                tx_state <= TX_DATA;
-                            end
+                    if (needs_escape(tx_frame_length)) begin
+                        if (!tx_escape_pending) begin
+                            uart_tx_byte <= JVS_ESCAPE;
+                            tx_escape_pending <= 1'b1;
+                            tx_escape_byte <= get_escape_byte(tx_frame_length);
+                            tx_next_state <= TX_LENGTH;  // Revenir pour envoyer l'échappement
                         end else begin
-                            uart_tx_byte <= tx_frame_length;
-                            uart_tx_start <= 1'b1;
+                            uart_tx_byte <= tx_escape_byte;
+                            tx_escape_pending <= 1'b0;
                             tx_checksum <= tx_checksum + tx_frame_length;
-                            tx_state <= TX_DATA;
+                            tx_next_state <= TX_DATA;
                         end
+                    end else begin
+                        uart_tx_byte <= tx_frame_length;
+                        tx_checksum <= tx_checksum + tx_frame_length;
+                        tx_next_state <= TX_DATA;
                     end
+                    tx_state <= TX_TRANSMIT_BYTE;
                 end
                 
                 TX_DATA: begin
-                    if (uart_tx_ready && !uart_tx_start) begin
-                        if (tx_data_idx < tx_frame_length) begin
-                            if (needs_escape(tx_frame_data[tx_data_idx])) begin
-                                if (!tx_escape_pending) begin
-                                    uart_tx_byte <= JVS_ESCAPE;
-                                    uart_tx_start <= 1'b1;
-                                    tx_escape_pending <= 1'b1;
-                                    tx_escape_byte <= get_escape_byte(tx_frame_data[tx_data_idx]);
-                                end else begin
-                                    uart_tx_byte <= tx_escape_byte;
-                                    uart_tx_start <= 1'b1;
-                                    tx_escape_pending <= 1'b0;
-                                    tx_checksum <= tx_checksum + tx_frame_data[tx_data_idx];
-                                    tx_data_idx <= tx_data_idx + 1;
-                                end
+                    if (tx_data_idx < tx_data_count) begin
+                        if (needs_escape(tx_frame_data[tx_data_idx])) begin
+                            if (!tx_escape_pending) begin
+                                uart_tx_byte <= JVS_ESCAPE;
+                                tx_escape_pending <= 1'b1;
+                                tx_escape_byte <= get_escape_byte(tx_frame_data[tx_data_idx]);
+                                tx_next_state <= TX_DATA;  // Revenir pour envoyer l'échappement
                             end else begin
-                                uart_tx_byte <= tx_frame_data[tx_data_idx];
-                                uart_tx_start <= 1'b1;
+                                uart_tx_byte <= tx_escape_byte;
+                                tx_escape_pending <= 1'b0;
                                 tx_checksum <= tx_checksum + tx_frame_data[tx_data_idx];
                                 tx_data_idx <= tx_data_idx + 1;
+                                tx_next_state <= TX_DATA;  // Continuer avec le prochain byte
                             end
                         end else begin
-                            tx_state <= TX_CHECKSUM;
+                            uart_tx_byte <= tx_frame_data[tx_data_idx];
+                            tx_checksum <= tx_checksum + tx_frame_data[tx_data_idx];
+                            tx_data_idx <= tx_data_idx + 1;
+                            tx_next_state <= TX_DATA;  // Continuer avec le prochain byte
                         end
+                        tx_state <= TX_TRANSMIT_BYTE;
+                    end else begin
+                        tx_state <= TX_CHECKSUM;
                     end
                 end
                 
                 TX_CHECKSUM: begin
-                    if (uart_tx_ready && !uart_tx_start) begin
-                        if (needs_escape(tx_checksum)) begin
-                            if (!tx_escape_pending) begin
-                                uart_tx_byte <= JVS_ESCAPE;
-                                uart_tx_start <= 1'b1;
-                                tx_escape_pending <= 1'b1;
-                                tx_escape_byte <= get_escape_byte(tx_checksum);
-                            end else begin
-                                uart_tx_byte <= tx_escape_byte;
-                                uart_tx_start <= 1'b1;
-                                tx_escape_pending <= 1'b0;
-                                tx_timer <= 0;
-                                tx_state <= TX_HOLD;
-                            end
+                    if (needs_escape(tx_checksum)) begin
+                        if (!tx_escape_pending) begin
+                            uart_tx_byte <= JVS_ESCAPE;
+                            tx_escape_pending <= 1'b1;
+                            tx_escape_byte <= get_escape_byte(tx_checksum);
+                            tx_next_state <= TX_CHECKSUM;  // Revenir pour envoyer l'échappement
                         end else begin
-                            uart_tx_byte <= tx_checksum;
-                            uart_tx_start <= 1'b1;
-                            tx_timer <= 0;
-                            tx_state <= TX_HOLD;
+                            uart_tx_byte <= tx_escape_byte;
+                            tx_escape_pending <= 1'b0;
+                            tx_next_state <= TX_HOLD;
                         end
+                    end else begin
+                        uart_tx_byte <= tx_checksum;
+                        tx_next_state <= TX_HOLD;
                     end
+                    tx_state <= TX_TRANSMIT_BYTE;
                 end
                 
+                TX_TRANSMIT_BYTE: begin
+                    if (!uart_tx_active && !uart_tx_dv) begin
+                        uart_tx_dv <= 1'b1;
+                        tx_state <= TX_TRANSMIT_BYTE_DONE;
+                    end
+                end
+
+                TX_TRANSMIT_BYTE_DONE: begin
+                    // Clear data valid signal when UART starts transmission
+                    if (uart_tx_dv && uart_tx_active) begin
+                        uart_tx_dv <= 1'b0;
+                    end
+                    // Move to next state when transmission completes
+                    if (uart_tx_done) begin
+                        tx_state <= tx_next_state;
+                    end
+                end
+
                 TX_HOLD: begin
-                    // RS485 hold delay (30μs)
-                    if (tx_timer < RS485_HOLD_CYCLES) begin
+                    // RS485 hold delay (30μs) - initialiser timer si pas déjà fait
+                    if (tx_next_state != TX_HOLD) begin
+                        tx_timer <= 0;
+                        tx_next_state <= TX_HOLD; // Éviter de réinitialiser
+                    end else if (tx_timer < RS485_HOLD_CYCLES) begin
                         tx_timer <= tx_timer + 1;
                     end else begin
                         rs485_tx_enable <= 1'b0;
