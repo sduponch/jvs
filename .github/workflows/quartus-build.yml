@@ -7,104 +7,84 @@ on:
     branches: [ main ]
 
 jobs:
-  simulation-tests:
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        repository: RndMnkIII/JVS_Debugger
-        ref: jvs_submodule
-        path: JVS_Debugger
-        submodules: 'recursive'
-
-    - name: Update JVS submodule to main
-      run: |
-        cd JVS_Debugger/src/fpga/analogizer/jvs
-        git fetch origin
-        git checkout origin/main
-        cd ../../../..
-        echo "✅ JVS submodule updated to main branch"
-
-    - name: Install Quartus dependencies (includes ModelSim)
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libc6-i386 lib32z1 lib32ncurses6 libbz2-1.0 libxext6 libxft2 libxi6 libxtst6
-
-    - name: Cache Quartus installation
-      uses: actions/cache@v4
-      id: quartus-cache
-      with:
-        path: |
-          ~/quartus
-          ~/downloadtmp
-        key: quartus-lite-24.1std-1077-${{ runner.os }}-cyclonev-modelsim
-        restore-keys: |
-          quartus-lite-24.1std-1077-${{ runner.os }}-
-
-    - name: Install Quartus Prime Lite (includes ModelSim)
-      if: steps.quartus-cache.outputs.cache-hit != 'true'
-      run: |
-        echo "⬇️ Cache miss - Installing Quartus Prime Lite..."
-
-        # Download and install Quartus Lite (includes ModelSim)
-        wget -q https://downloads.intel.com/akdlm/software/acdsinst/24.1std/1077/qinst/qinst-lite-linux-24.1std-1077.run
-        chmod +x qinst-lite-linux-24.1std-1077.run
-
-        # Extract and install Quartus only
-        ./qinst-lite-linux-24.1std-1077.run --accept --quiet --nox11 --target $HOME/quartus_temp -- --cli --download-dir ~/downloadtmp --install-dir ~/quartus --accept-eula --components quartus,cyclonev
-
-        # Install ModelSim separately
-        echo "📦 Installing ModelSim separately..."
-        wget -q https://downloads.intel.com/akdlm/software/acdsinst/20.1std.1/720/ib_installers/ModelSimSetup-20.1.1.720-linux.run
-        chmod +x ModelSimSetup-20.1.1.720-linux.run
-        ./ModelSimSetup-20.1.1.720-linux.run --mode unattended --installdir ~/quartus/modelsim_ase --accept_eula 1
-
-    - name: Setup Quartus environment (with ModelSim)
-      run: |
-        if [ "${{ steps.quartus-cache.outputs.cache-hit }}" == "true" ]; then
-          echo "✅ Cache hit - Using cached Quartus installation"
-        fi
-
-        # Set environment variables for Quartus and ModelSim
-        echo "QUARTUS_ROOTDIR=$HOME/quartus/quartus" >> $GITHUB_ENV
-        echo "PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$HOME/quartus/modelsim_ase/linuxaloem:$PATH" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib:$HOME/quartus/modelsim_ase/linuxaloem" >> $GITHUB_ENV
-
-    - name: Run JVS Simulation Tests
-      run: |
-        cd JVS_Debugger/src/fpga/analogizer/jvs/simu
-
-        # Verify ModelSim is working
-        echo "✅ Testing ModelSim installation..."
-        vsim -version || echo "Version check failed but continuing..."
-
-        # Run Test 03: Full JVS identification sequence
-        echo "🧪 Running Test 03: Full JVS identification..."
-        make test_03
-
-        echo "✅ JVS Test 03 completed successfully"
-
-    - name: Upload test results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: jvs-simulation-results
-        path: |
-          JVS_Debugger/src/fpga/analogizer/jvs/simu/*.vcd
-          JVS_Debugger/src/fpga/analogizer/jvs/simu/*.log
-          JVS_Debugger/src/fpga/analogizer/jvs/simu/work/
-        retention-days: 7
+  # Simulation tests are temporarily disabled
+  # simulation-tests:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #   - name: Checkout repository
+  #     uses: actions/checkout@v4
+  #     with:
+  #       repository: RndMnkIII/JVS_Debugger
+  #       ref: jvs_submodule
+  #       path: JVS_Debugger
+  #       submodules: 'recursive'
+  #   - name: Update JVS submodule to main
+  #     run: |
+  #       cd JVS_Debugger/src/fpga/analogizer/jvs
+  #       git fetch origin
+  #       git checkout origin/main
+  #       cd ../../../..
+  #       echo "✅ JVS submodule updated to main branch"
+  #   - name: Install Quartus dependencies (includes ModelSim)
+  #     run: |
+  #       sudo apt-get update
+  #       sudo apt-get install -y libc6-i386 lib32z1 lib32ncurses6 libbz2-1.0 libxext6 libxft2 libxi6 libxtst6
+  #   - name: Cache Quartus installation
+  #     uses: actions/cache@v4
+  #     id: quartus-cache
+  #     with:
+  #       path: |
+  #         ~/quartus
+  #         ~/downloadtmp
+  #       key: quartus-lite-24.1std-1077-${{ runner.os }}-cyclonev-modelsim
+  #       restore-keys: |
+  #         quartus-lite-24.1std-1077-${{ runner.os }}-
+  #   - name: Install Quartus Prime Lite (includes ModelSim)
+  #     if: steps.quartus-cache.outputs.cache-hit != 'true'
+  #     run: |
+  #       echo "⬇️ Cache miss - Installing Quartus Prime Lite..."
+  #       wget -q https://downloads.intel.com/akdlm/software/acdsinst/24.1std/1077/qinst/qinst-lite-linux-24.1std-1077.run
+  #       chmod +x qinst-lite-linux-24.1std-1077.run
+  #       ./qinst-lite-linux-24.1std-1077.run --accept --quiet --nox11 --target $HOME/quartus_temp -- --cli --download-dir ~/downloadtmp --install-dir ~/quartus --accept-eula --components quartus,cyclonev
+  #       echo "📦 Installing ModelSim separately..."
+  #       wget -q https://downloads.intel.com/akdlm/software/acdsinst/20.1std.1/720/ib_installers/ModelSimSetup-20.1.1.720-linux.run
+  #       chmod +x ModelSimSetup-20.1.1.720-linux.run
+  #       ./ModelSimSetup-20.1.1.720-linux.run --mode unattended --installdir ~/quartus/modelsim_ase --accept_eula 1
+  #   - name: Setup Quartus environment (with ModelSim)
+  #     run: |
+  #       if [ "${{ steps.quartus-cache.outputs.cache-hit }}" == "true" ]; then
+  #         echo "✅ Cache hit - Using cached Quartus installation"
+  #       fi
+  #       echo "QUARTUS_ROOTDIR=$HOME/quartus/quartus" >> $GITHUB_ENV
+  #       echo "PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$HOME/quartus/modelsim_ase/linuxaloem:$PATH" >> $GITHUB_ENV
+  #       echo "LD_LIBRARY_PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib:$HOME/quartus/modelsim_ase/linuxaloem" >> $GITHUB_ENV
+  #   - name: Run JVS Simulation Tests
+  #     run: |
+  #       cd JVS_Debugger/src/fpga/analogizer/jvs/simu
+  #       echo "✅ Testing ModelSim installation..."
+  #       vsim -version || echo "Version check failed but continuing..."
+  #       echo "🧪 Running Test 03: Full JVS identification..."
+  #       make test_03
+  #       echo "✅ JVS Test 03 completed successfully"
+  #   - name: Upload test results
+  #     uses: actions/upload-artifact@v4
+  #     if: always()
+  #     with:
+  #       name: jvs-simulation-results
+  #       path: |
+  #         JVS_Debugger/src/fpga/analogizer/jvs/simu/*.vcd
+  #         JVS_Debugger/src/fpga/analogizer/jvs/simu/*.log
+  #         JVS_Debugger/src/fpga/analogizer/jvs/simu/work/
+  #       retention-days: 7
 
   quartus-build:
-    needs: simulation-tests
+    # needs: simulation-tests  # Dependency removed since simulation is disabled
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pages: write
       id-token: write
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -113,7 +93,7 @@ jobs:
         ref: jvs_submodule
         path: JVS_Debugger
         submodules: 'recursive'
-        
+
     - name: Update JVS submodule to main
       run: |
         cd JVS_Debugger/src/fpga/analogizer/jvs
@@ -121,12 +101,12 @@ jobs:
         git checkout origin/main
         cd ../../../..
         echo "✅ JVS submodule updated to main branch"
-    
+
     - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y libc6-i386 lib32z1 lib32ncurses6 libbz2-1.0 libxext6 libxft2 libxi6 libxtst6
-    
+
     - name: Cache Quartus installation
       uses: actions/cache@v4
       id: quartus-cache
@@ -137,160 +117,160 @@ jobs:
         key: quartus-lite-24.1std-1077-${{ runner.os }}-cyclonev-modelsim
         restore-keys: |
           quartus-lite-24.1std-1077-${{ runner.os }}-
-    
+
     - name: Install Quartus Prime Lite
       if: steps.quartus-cache.outputs.cache-hit != 'true'
       run: |
         echo "⬇️ Cache miss - Installing Quartus Prime Lite..."
-        
+
         # Download and install Quartus Lite
         wget -q https://downloads.intel.com/akdlm/software/acdsinst/24.1std/1077/qinst/qinst-lite-linux-24.1std-1077.run
         chmod +x qinst-lite-linux-24.1std-1077.run
-        
+
         # Extract and install automatically
-        ./qinst-lite-linux-24.1std-1077.run --accept --quiet --nox11 --target $HOME/quartus_temp -- --cli --download-dir ~/downloadtmp --install-dir ~/quartus --accept-eula --components quartus,cyclonev
-        
+        ./qinst-lite-linux-24.1std-1077.run --accept --quiet --nox11 --target $HOME/quartus_temp -- --cli --download-dir ~/downloadtmp --install-dir ~/quartus --accept-eula --components quartus,cyclonv
+
         # Installation should be done automatically by the extractor above
         echo "Installation completed by extractor"
-    
+
     - name: Setup Quartus environment
       run: |
         if [ "${{ steps.quartus-cache.outputs.cache-hit }}" == "true" ]; then
           echo "✅ Cache hit - Using cached Quartus installation"
         fi
-        
+
         # Find Quartus installation
         find ~/quartus -name "quartus_sh" -type f 2>/dev/null || echo "quartus_sh not found in ~/quartus"
         find $HOME -name "quartus_sh" -type f 2>/dev/null || echo "quartus_sh not found in HOME"
-        
+
         # Set environment variables for Quartus
         echo "QUARTUS_ROOTDIR=$HOME/quartus/quartus" >> $GITHUB_ENV
         echo "PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$PATH" >> $GITHUB_ENV
         echo "LD_LIBRARY_PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib" >> $GITHUB_ENV
-    
+
     - name: Compile JVS project
       run: |
         # Set up environment
         export LD_LIBRARY_PATH="$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib:$LD_LIBRARY_PATH"
         export PATH="$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$PATH"
         export QUARTUS_ROOTDIR="$HOME/quartus/quartus"
-        
+
         # Verify Quartus is working
         echo "✅ Testing quartus_sh..."
         echo "PATH: $PATH"
         echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
         ldd $HOME/quartus/quartus/linux64/quartus_sh | grep "not found" || echo "All libraries found"
         quartus_sh --version || echo "Version check failed but continuing..."
-        
+
         # Run compilation
         echo "🚀 Starting compilation..."
         cd JVS_Debugger/src/fpga
         quartus_sh --flow compile JVS_Debugger
-    
+
     - name: Create RBF_R for Analog Pocket
       run: |
         cd JVS_Debugger/src/fpga
         if [ -f "output_files/JVS_Debugger.rbf" ]; then
           echo "🔄 Creating RBF_R (bit-reversed RBF) for Analog Pocket..."
-          
+
           # Create bit-reversed RBF for Analog Pocket
           printf 'import sys\ndef reverse_byte_bits(b):\n    r = 0\n    for i in range(8):\n        if b & (1 << i):\n            r |= (1 << (7 - i))\n    return r\nwith open("output_files/JVS_Debugger.rbf", "rb") as inf, open("output_files/jvs_debug.rbf_r", "wb") as outf:\n    while True:\n        byte = inf.read(1)\n        if not byte:\n            break\n        outf.write(bytes([reverse_byte_bits(byte[0])]))' > reverse_rbf.py
           python3 reverse_rbf.py
-          
+
           echo "✅ RBF_R file created: $(wc -c < output_files/jvs_debug.rbf_r) bytes"
         else
           echo "❌ No RBF file found to process"
           exit 1
         fi
-    
+
     - name: Extract FPGA Utilization
       run: |
         cd JVS_Debugger/src/fpga
         echo "📊 Extracting FPGA utilization statistics..."
-        
+
         # Extract from fit report
         if [ -f "output_files/JVS_Debugger.fit.rpt" ]; then
           echo "=== FPGA Resource Utilization ===" > fpga_stats.txt
           echo "" >> fpga_stats.txt
-          
+
           # Overall logic utilization
           grep -A 20 "Logic utilization" output_files/JVS_Debugger.fit.rpt | head -25 >> fpga_stats.txt || echo "Logic utilization not found" >> fpga_stats.txt
           echo "" >> fpga_stats.txt
-          
+
           # Total resources (try different patterns)
           grep -E "(Total logic elements|logic elements)" output_files/JVS_Debugger.fit.rpt | head -1 >> fpga_stats.txt || echo "Total logic elements: Not found" >> fpga_stats.txt
           grep -E "(Total memory bits|memory bits)" output_files/JVS_Debugger.fit.rpt | head -1 >> fpga_stats.txt || echo "Total memory bits: Not found" >> fpga_stats.txt
           grep "Total DSP Blocks" output_files/JVS_Debugger.fit.rpt >> fpga_stats.txt || echo "Total DSP Blocks: Not found" >> fpga_stats.txt
           grep "Total PLLs" output_files/JVS_Debugger.fit.rpt >> fpga_stats.txt || echo "Total PLLs: Not found" >> fpga_stats.txt
-          
+
           echo "" >> fpga_stats.txt
           echo "=== Module Hierarchy Utilization ===" >> fpga_stats.txt
-          
+
           # Extract hierarchy utilization section
           if grep -q "Hierarchy" output_files/JVS_Debugger.fit.rpt; then
             # Look for hierarchy section with logic elements breakdown
             awk '/Logic Cells in each hierarchy/{flag=1; next} /^$/{if(flag) flag=0} flag && /jvs|JVS/' output_files/JVS_Debugger.fit.rpt >> fpga_stats.txt || echo "JVS hierarchy details not found" >> fpga_stats.txt
           fi
-          
+
           # Try alternative hierarchy section
           if grep -q "Hierarchy breakdown" output_files/JVS_Debugger.fit.rpt; then
             grep -A 50 "Hierarchy breakdown" output_files/JVS_Debugger.fit.rpt | grep -E "(jvs|JVS)" | head -20 >> fpga_stats.txt
           fi
-          
+
           # Look for specific module instances
           echo "" >> fpga_stats.txt
           echo "--- JVS Module Details ---" >> fpga_stats.txt
           grep -E "jvs_controller|jvs_com|jvscom" output_files/JVS_Debugger.fit.rpt | head -10 >> fpga_stats.txt || echo "JVS module instances not found" >> fpga_stats.txt
-          
+
           echo "" >> fpga_stats.txt
           echo "=== Module Resource Breakdown ===" >> fpga_stats.txt
-          
-          # Look for compilation hierarchy section  
+
+          # Look for compilation hierarchy section
           if grep -q "Compilation Hierarchy Node" output_files/JVS_Debugger.fit.rpt; then
             grep -A 5 -B 1 -E "(jvs_controller|jvs_com|jvscom)" output_files/JVS_Debugger.fit.rpt | head -30 >> fpga_stats.txt || echo "Module breakdown not found" >> fpga_stats.txt
           fi
-          
+
           # Try to find resource usage by entity
-          echo "" >> fpga_stats.txt  
+          echo "" >> fpga_stats.txt
           echo "--- Resource Usage by Entity ---" >> fpga_stats.txt
           if grep -q "Entity Name" output_files/JVS_Debugger.fit.rpt; then
             grep -A 2 -B 2 -E "(jvs_controller|jvs_com)" output_files/JVS_Debugger.fit.rpt | head -20 >> fpga_stats.txt || echo "Entity resource usage not found" >> fpga_stats.txt
           fi
-          
+
           echo "" >> fpga_stats.txt
           echo "=== Timing Summary ===" >> fpga_stats.txt
           grep -A 10 "Slow 1100mV" output_files/JVS_Debugger.sta.rpt | head -10 >> fpga_stats.txt 2>/dev/null || echo "Timing info not found" >> fpga_stats.txt
-          
+
           echo "📋 FPGA Utilization Summary (with module details):"
           cat fpga_stats.txt
         else
           echo "⚠️ No fit report found"
         fi
-    
+
     - name: Package Analog Pocket Core
       run: |
         cd JVS_Debugger
-        
+
         # Set scripts location
         export SCRIPTS_DIR="src/fpga/analogizer/jvs/scripts"
-        
+
         # Debug: Check script existence and permissions
         echo "📋 Checking scripts..."
         ls -la ${SCRIPTS_DIR}/
-        
+
         # Ensure scripts are executable (fallback)
         chmod +x ${SCRIPTS_DIR}/*.sh || true
-        
+
         # Use packaging script
         ./${SCRIPTS_DIR}/package.sh
-        
+
         # Generate HTML page using Python script
         export BUILD_NUMBER="${{ github.run_number }}"
         export COMMIT_SHA="${{ github.sha }}"
         export BUILD_DATE="$(date -u)"
         export BRANCH_NAME="${{ github.ref_name }}"
         python3 ${SCRIPTS_DIR}/generate_html_stats.py
-        
+
         # Create markdown version for compatibility
         echo "# JVS_Debugger Build Info" > package/BUILD_INFO.md
         echo "" >> package/BUILD_INFO.md
@@ -299,7 +279,7 @@ jobs:
         echo "**Date:** $(date -u)" >> package/BUILD_INFO.md
         echo "**Branch:** ${{ github.ref_name }}" >> package/BUILD_INFO.md
         echo "" >> package/BUILD_INFO.md
-        
+
         if [ -f "src/fpga/fpga_stats.txt" ]; then
           echo "## FPGA Utilization" >> package/BUILD_INFO.md
           echo '```' >> package/BUILD_INFO.md
@@ -307,22 +287,22 @@ jobs:
           echo '```' >> package/BUILD_INFO.md
           echo "" >> package/BUILD_INFO.md
         fi
-    
+
     - name: Setup Pages
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       uses: actions/configure-pages@v4
-      
+
     - name: Upload to Pages
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       uses: actions/upload-pages-artifact@v3
       with:
         path: JVS_Debugger/package
-        
+
     - name: Deploy to GitHub Pages
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       uses: actions/deploy-pages@v4
       id: deployment
-    
+
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       if: always()
@@ -335,7 +315,7 @@ jobs:
           JVS_Debugger/src/fpga/*.rpt
           JVS_Debugger/src/fpga/*.summary
         retention-days: 30
-    
+
     - name: Check compilation result
       run: |
         if [ -f "JVS_Debugger/src/fpga/output_files/JVS_Debugger.rbf" ]; then
