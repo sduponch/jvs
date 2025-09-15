@@ -35,14 +35,23 @@ SOURCES = ../rtl/jvs_node_info_pkg.sv \
 SMART_SOURCES = ../rtl/jvs_node_info_pkg.sv \
                 ../jvscom/uart_tx.v \
                 ../jvscom/uart_rx.v \
+                ../jvscom/jvs_com.sv \
                 ../jvs_controller.sv \
                 smart_jvs_device.sv
+
+# Sources pour tests avec l'ancien controller refactorisé
+REFACTOR_SOURCES = ../rtl/jvs_node_info_pkg.sv \
+                   ../jvscom/uart_tx.v \
+                   ../jvscom/uart_rx.v \
+                   ../jvscom/jvs_com.sv \
+                   ../jvs_controller.sv.to_refactor \
+                   smart_jvs_device.sv
 
 # Flags de compilation
 VLOG_FLAGS = -sv +incdir+../include +incdir+../rtl +incdir+../jvscom +incdir+.. -suppress 2892
 
 # Targets de test
-.PHONY: all test_01 test_02 test_03 clean setup
+.PHONY: all test_01 test_02 test_03 test_03_refactor clean setup
 
 all: setup test_01
 
@@ -70,6 +79,11 @@ test_03: setup
 	@echo "=== Exécution du Test 03 ==="
 	$(VSIM) -c -do "run -all; quit" $(WORK_LIB).test_03_device_identification
 
+test_03_refactor: setup
+	@echo "=== Compilation du Test 03: Device Identification avec Controller Refactorisé ==="
+	$(VLOG) $(VLOG_FLAGS) -work $(WORK_LIB) $(REFACTOR_SOURCES) test_03_device_identification.sv
+	@echo "=== Exécution du Test 03 avec ancien controller refactorisé ==="
+	$(VSIM) -c -do "run -all; quit" $(WORK_LIB).test_03_device_identification
 
 # Test avec GUI pour debug
 test_01_gui: setup
@@ -89,10 +103,11 @@ clean:
 # Affichage de l'aide
 help:
 	@echo "Targets disponibles:"
-	@echo "  test_01       - Test de trame reset UART (optimisé 250kHz)"
-	@echo "  test_02       - Test de séquence d'assignation d'adresse (optimisé 250kHz)"
-	@echo "  test_03       - Test d'identification JVS complète avec Smart Device"
-	@echo "  test_01_gui   - Test 01 avec interface graphique Modelsim"
-	@echo "  test_01_wave  - Test 01 avec génération de waveform"
-	@echo "  setup         - Configuration des bibliothèques"
-	@echo "  clean         - Nettoyer les fichiers générés"
+	@echo "  test_01         - Test de trame reset UART (optimisé 250kHz)"
+	@echo "  test_02         - Test de séquence d'assignation d'adresse (optimisé 250kHz)"
+	@echo "  test_03         - Test d'identification JVS complète avec Smart Device"
+	@echo "  test_03_refactor- Test 03 avec l'ancien controller refactorisé"
+	@echo "  test_01_gui     - Test 01 avec interface graphique Modelsim"
+	@echo "  test_01_wave    - Test 01 avec génération de waveform"
+	@echo "  setup           - Configuration des bibliothèques"
+	@echo "  clean           - Nettoyer les fichiers générés"

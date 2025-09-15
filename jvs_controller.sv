@@ -197,6 +197,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     // Edge detection for RX complete signal
     logic       com_rx_complete_d;      // Delayed version for edge detection
     wire        com_rx_complete_negedge = com_rx_complete_d & ~com_rx_complete;
+
+    // Name copying variables for device identification parsing
+    logic [7:0] copy_write_idx;         // Write index for name copying
     logic [7:0] buffer_push_byte;       // Byte to push
     logic       buffer_commit;          // Pulse to start sending buffer
     logic       buffer_ready;           // Buffer ready to accept new data
@@ -207,12 +210,13 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     
     // Instantiate JVS communication module
     jvs_com #(
-        .UART_CLKS_PER_BIT(UART_CLKS_PER_BIT),
+        .MASTER_CLK_FREQ(MASTER_CLK_FREQ),
         .JVS_BUFFER_SIZE(256)
     ) jvs_com_inst (
-        .clk_sys(i_clk),
+        .clk_sys(~i_clk),
         .reset(i_rst),
-        
+        .i_ena(1'b1),
+
         // UART Physical Interface
         .uart_rx(i_uart_rx),
         .uart_tx(o_uart_tx),
@@ -499,12 +503,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     localparam STATE_SEND_INPUTS_SCREEN = 5'h18;   // Add screen position inputs if available
     localparam STATE_SEND_INPUTS_MISC = 5'h19;     // Add misc inputs if available
     localparam STATE_SEND_OUTPUT_DIGITAL = 5'h1A; // Send output digital command for GPIO
-    localparam STATE_SEND_FINALIZE = 5'h1B; // Finalize frame and transmit
     localparam STATE_FIRST_RESET_ARG = 5'h1C; // Push reset argument and commit
     localparam STATE_SECOND_RESET_ARG = 5'h1D; // Push second reset argument and commit  
     localparam STATE_TX_NEXT = 5'h1D; // Generic state for pulse handling and counter increment
     localparam STATE_RX_NEXT = 5'h1E; // Generic state for pulse handling and counter increment
-    localparam STATE_WAIT_TX_COMPLETE = 5'h1F; // Wait for TX completion
+    localparam STATE_FATAL_ERROR = 5'h1F; // Fatal error state - stops execution with error message
 
     // RS485 State Machine - Controls transceiver direction with proper timing
     localparam RS485_RECEIVE = 2'b00;         // Receive mode (default)
@@ -544,15 +547,13 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     
     // TX state management for sequential byte transmission
     logic [4:0] return_state;      // State to return to after TX_NEXT
-    logic [2:0] cmd_pos;           // Position in current command sequence
+    logic [7:0] cmd_pos;           // Position in current command sequence (was [2:0] - caused overflow)
     
     // Timing and protocol control
     logic [31:0] delay_counter;    // Multi-purpose delay counter
     logic [31:0] timeout_counter;  // Timeout counter for waiting states
     logic [31:0] poll_timer;       // Timer for input polling frequency
-    logic [7:0] current_device_addr; // Address assigned to JVS device (usually 0x01)
-    logic [4:0] last_tx_state;     // Tracks the last command sent for response handling
-    
+    logic [7:0] current_device_addr; // Address assigned to JVS device (usually 0x01)  
     
     //=========================================================================
     // JVS NODE INFORMATION STRUCTURES
@@ -646,11 +647,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             timeout_counter <= 32'h0;
             poll_timer <= 32'h0;
             current_device_addr <= 8'h01;    // Standard JVS device address
-            last_tx_state <= 5'h0;
             
             // Initialize TX state management
             return_state <= 5'h0;
-            cmd_pos <= 3'h0;
+            cmd_pos <= 8'h0;
             
             // Initialize jvs_com control signals
             com_tx_data <= 8'h00;
@@ -720,9 +720,8 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             default: begin
                                 // All bytes sent, commit and transition
                                 com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
+                                cmd_pos <= 8'd0;
                                 main_state <= STATE_FIRST_RESET_DELAY;
-                                last_tx_state <= STATE_FIRST_RESET;
                             end
                         endcase
                     end
@@ -732,6 +731,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // DELAY AFTER FIRST RESET
                 //-------------------------------------------------------------
                 STATE_FIRST_RESET_DELAY: begin
+
                     // 2 second delay after first RESET
                     // Allows JVS devices to complete their reset sequence
                     //if (delay_counter < 32'h6000000) begin  // 100,663,296 cycles = 2s at 50MHz
@@ -766,9 +766,8 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             default: begin
                                 // All bytes sent, commit and transition
                                 com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
+                                cmd_pos <= 8'd0;
                                 main_state <= STATE_SECOND_RESET_DELAY;
-                                last_tx_state <= STATE_SECOND_RESET;
                             end
                         endcase
                     end
@@ -796,12 +795,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     // Send SET ADDRESS command using sequential byte transmission
                     // This assigns a unique address (0x01) to the JVS device
                     if (com_tx_ready) begin
+                        $display("[CONTROLLER][STATE_SEND_SETADDR] cmd_pos 0x%02X", cmd_pos);
                         // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Still broadcast for address assignment
-                            return_state <= STATE_SEND_SETADDR;
-                        end
-                        
+                        com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Still broadcast for address assignment
+                        return_state <= STATE_SEND_SETADDR;
+                        main_state <= STATE_TX_NEXT;
                         // Select byte and signal based on position
                         case (cmd_pos)
                             3'd0: begin
@@ -812,14 +810,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             3'd1: begin
                                 com_tx_data <= current_device_addr; // 01 - Address to assign
                                 com_tx_data_push <= 1'b1;           // Push as data
-                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
                             end
                             default: begin
                                 // All bytes sent, commit and transition
                                 com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
-                                main_state <= STATE_WAIT_RX;
-                                last_tx_state <= STATE_SEND_SETADDR;
+                                return_state <= STATE_WAIT_RX;
                             end
                         endcase
                     end
@@ -829,19 +824,21 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     return_state <= STATE_PARSE_SETADDR;
                     case (cmd_pos)
                         3'd0: begin
+                            com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
                             // Check REPORT byte
                             if (com_rx_byte == REPORT_NORMAL) begin
-                                $display("[CONTROLLER][STATE_PARSE_SETADDR] Address %d accepted", current_device_addr);
-                                main_state <= STATE_SEND_CMDREV;
+                                $display("[CONTROLLER][STATE_PARSE_SETADDR] Address %d accepted %d", current_device_addr, com_rx_remaining);
+                                com_rx_next <= 1'b1;     // Advance to first name character
+                                main_state <= STATE_RX_NEXT;
                             end else begin
-                                $display("[CONTROLLER][STATE_PARSE_SETADDR] ERROR: Bad REPORT 0x%02X for JVSREV", com_rx_byte);
-                                main_state <= STATE_PARSE_SETADDR; // Retry
+                                $display("[CONTROLLER][STATE_PARSE_SETADDR] ERROR: Bad REPORT 0x%02X for SETADDR", com_rx_byte);
+                                $display("[CONTROLLER][FATAL_ERROR] SETADDR failed - device rejected address assignment");
+                                main_state <= STATE_FATAL_ERROR;
                             end
                         end
                         default: begin
-                            main_state <= STATE_PARSE_SETADDR; // Error, retry
-                            cmd_pos <= 3'd0;
-                            com_src_cmd_next <= 1'b1;
+                            cmd_pos <= 8'd0;          // Reset position for next command
+                            main_state <= STATE_SEND_IOIDENT;
                         end
                     endcase
                 end
@@ -849,83 +846,98 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // READ ID COMMAND - Request device identification
                 //-------------------------------------------------------------
                 STATE_SEND_IOIDENT: begin
-                    // Send READ ID command using sequential byte transmission
-                    // This requests the device to send its identification string
                     if (com_tx_ready) begin
+                        $display("[CONTROLLER][STATE_SEND_IOIDENT] cmd_pos 0x%02X", cmd_pos);
                         // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= current_device_addr; // 01 - Address specific device
-                            return_state <= STATE_SEND_IOIDENT;
-                        end
-                        
+                        com_dst_node <= current_device_addr; // 01 - Address specific device
+                        return_state <= STATE_SEND_IOIDENT;
+                        main_state <= STATE_TX_NEXT;
                         // Select byte and signal based on position
                         case (cmd_pos)
                             3'd0: begin
                                 com_tx_data <= CMD_IOIDENT;          // IO identity command (0x10)
                                 com_tx_cmd_push <= 1'b1;             // Push as command
-                                main_state <= STATE_TX_NEXT;         // Go to TX_NEXT
+                                main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
                             end
                             default: begin
-                                // All bytes sent, commit and transition
+                                // All bytes sent, commit and transition then wait answer
                                 com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
-                                main_state <= STATE_WAIT_RX;
-                                last_tx_state <= STATE_SEND_IOIDENT;
+                                return_state <= STATE_WAIT_RX;
                             end
                         endcase
                     end
                 end
                 STATE_PARSE_IOIDENT: begin
-                    $display("[STATE_PARSE_IOIDENT] cmd_pos 0x%02X, rx_byte 0x%02X", cmd_pos, com_rx_byte);
                     return_state <= STATE_PARSE_IOIDENT;
                     case (cmd_pos)
                         3'd0: begin
+                            com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
                             // Check REPORT byte
                             if (com_rx_byte == REPORT_NORMAL) begin
-                                com_rx_next <= 1'b1;
-                                main_state <= STATE_TX_NEXT;
+                                copy_write_idx <= 8'd0;  // Reset write index for name copying
+                                com_rx_next <= 1'b1;     // Advance to first name character
+                                main_state <= STATE_RX_NEXT;
                             end else begin
-                                $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for JVSREV", com_rx_byte);
-                                main_state <= STATE_SEND_JVSREV; // Retry
+                                $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for IOIDENT", com_rx_byte);
+                                $display("[CONTROLLER][FATAL_ERROR] IOIDENT failed - device cannot provide identification");
+                                main_state <= STATE_FATAL_ERROR;
                             end
                         end
-                        3'd1: begin
-                            // Extract JVS revision data
-                            if (com_rx_remaining > 0) begin
-                                jvs_nodes_r.node_jvs_ver[current_device_addr - 1] <= com_rx_byte;
-                                com_rx_next <= 1'b1; // Advance to next byte
+                        default: begin
+                            // Copy device name characters until null terminator or end of data
+                            if (com_rx_remaining > 0) begin // > 1 because we need to leave room for checksum
+                                if (com_rx_byte == 8'h00) begin
+                                    // Found null terminator, store it and finish copying
+                                    jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
+                                    $display("[CONTROLLER][STATE_PARSE_IOIDENT] Name copy complete, %d chars %d", copy_write_idx, com_rx_remaining);
+                                    $write("[CONTROLLER][STATE_PARSE_IOIDENT] Device name: ");
+                                    for (int i = 0; i < copy_write_idx; i++) begin
+                                        $write("%c", jvs_nodes_r.node_name[current_device_addr - 1][i]);
+                                    end
+                                    $display("");
+                                    main_state <= STATE_SEND_CMDREV; // Proceed to command revision
+                                end else if (copy_write_idx < jvs_node_info_pkg::NODE_NAME_SIZE - 1) begin
+                                    // Copy character to node name buffer
+                                    jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= com_rx_byte;
+                                    copy_write_idx <= copy_write_idx + 1;
+                                    com_rx_next <= 1'b1;     // Advance to first name character
+                                    main_state <= STATE_RX_NEXT;
+                                end else begin
+                                    // Buffer full, skip remaining characters until null terminator
+                                    $display("[CONTROLLER][STATE_PARSE_IOIDENT] Name buffer full, skipping chars");
+                                    com_rx_next <= 1'b1;     // Advance to first name character
+                                    main_state <= STATE_SEND_CMDREV;
+                                end
+                            end else begin
+                                // End of data reached without null terminator
+                                $display("[CONTROLLER][STATE_PARSE_IOIDENT] End of data reached, name copy complete");
+                                cmd_pos <= 8'd0;
+                                main_state <= STATE_SEND_CMDREV; // Proceed to command revision
                             end
-                            cmd_pos <= 3'd0;                  // Reset for next TX command
-                            main_state <= STATE_SEND_COMMVER; // Proceed to next command
                         end
-                        default: main_state <= STATE_SEND_JVSREV; // Error, retry
                     endcase
                 end
                 //-------------------------------------------------------------
                 // COMMAND REVISION REQUEST - Get command format revision
                 //-------------------------------------------------------------
                 STATE_SEND_CMDREV: begin
-                    // Send CMDREV command using sequential byte transmission
                     if (com_tx_ready) begin
-                        // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= current_device_addr; // 01
-                            return_state <= STATE_SEND_CMDREV;
-                        end
-                        
+                        $display("[CONTROLLER][STATE_SEND_IOIDENT] cmd_pos 0x%02X", cmd_pos);
+                        // Initialize command parameters on first entry                       
+                        main_state <= STATE_TX_NEXT;
+                        com_dst_node <= current_device_addr; // 01 - Address specific device
+                        return_state <= STATE_SEND_CMDREV;
                         // Select byte and signal based on position
                         case (cmd_pos)
                             3'd0: begin
-                                com_tx_data <= CMD_CMDREV;          // Command revision command (0x11)
                                 com_tx_cmd_push <= 1'b1;            // Push as command
+                                com_tx_data <= CMD_CMDREV;          // Command revision command (0x11)
                                 main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
                             end
                             default: begin
                                 // All bytes sent, commit and transition
                                 com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
                                 main_state <= STATE_WAIT_RX;
-                                last_tx_state <= STATE_SEND_CMDREV;
                             end
                         endcase
                     end
@@ -936,10 +948,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     case (cmd_pos)
                         3'd0: begin
                             // Check REPORT byte
+                            com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
                             if (com_rx_byte == REPORT_NORMAL) begin
                                 $display("[CONTROLLER][STATE_PARSE_CMDREV] Report Normal");
                                 com_rx_next <= 1'b1;
-                                main_state <= STATE_TX_NEXT;
+                                main_state <= STATE_RX_NEXT;
                             end else begin
                                 $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for JVSREV", com_rx_byte);
                                 main_state <= STATE_SEND_JVSREV; // Retry
@@ -953,7 +966,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 jvs_nodes_r.node_cmd_ver[current_device_addr - 1] <= com_rx_byte;
                                 com_rx_next <= 1'b1; // Advance to next byte
                             end
-                            cmd_pos <= 3'd0;                  // Reset for next TX command
+                            cmd_pos <= 8'd0;                  // Reset for next TX command
                             main_state <= STATE_SEND_JVSREV; // Proceed to next command
                         end
                         default: main_state <= STATE_SEND_JVSREV; // Error, retry
@@ -965,24 +978,19 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 STATE_SEND_JVSREV: begin
                     // Send JVSREV command using sequential byte transmission
                     if (com_tx_ready) begin
-                        // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= current_device_addr; // 01
-                            return_state <= STATE_SEND_JVSREV;
-                        end
-                        
+                        com_dst_node <= current_device_addr; // 01
+                        return_state <= STATE_SEND_JVSREV;
                         // Select byte and signal based on position
                         case (cmd_pos)
                             3'd0: begin
-                                com_tx_data <= CMD_JVSREV;          // JVS revision command (0x12)
+                                com_tx_data <= CMD_JVSREV;          // Command revision command (0x11)
                                 com_tx_cmd_push <= 1'b1;            // Push as command
                                 main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
                             end
                             default: begin
                                 // All bytes sent, commit and transition
                                 com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
-                                main_state <= STATE_SEND_COMMVER;
+                                main_state <= STATE_WAIT_RX;
                             end
                         endcase
                     end
@@ -992,11 +1000,12 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     return_state <= STATE_PARSE_JVSREV;
                     case (cmd_pos)
                         3'd0: begin
+                            com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
                             // Check REPORT byte
                             if (com_rx_byte == REPORT_NORMAL) begin
                                 $display("[CONTROLLER][STATE_PARSE_JVSREV] Report Normal");
                                 com_rx_next <= 1'b1;
-                                main_state <= STATE_TX_NEXT;
+                                main_state <= STATE_RX_NEXT;
                             end else begin
                                 $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for JVSREV", com_rx_byte);
                                 main_state <= STATE_SEND_JVSREV; // Retry
@@ -1010,7 +1019,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 jvs_nodes_r.node_jvs_ver[current_device_addr - 1] <= com_rx_byte;
                                 com_rx_next <= 1'b1; // Advance to next byte
                             end
-                            cmd_pos <= 3'd0;                  // Reset for next TX command
+                            cmd_pos <= 8'd0;                  // Reset for next TX command
                             main_state <= STATE_SEND_COMMVER; // Proceed to next command
                         end
                         default: main_state <= STATE_SEND_JVSREV; // Error, retry
@@ -1023,24 +1032,19 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     // Send COMMVER command using sequential byte transmission
                     if (com_tx_ready) begin
                         // Initialize command parameters on first entry
-                        if (cmd_pos == 0) begin
-                            com_dst_node <= current_device_addr; // 01
-                            return_state <= STATE_SEND_COMMVER;
-                        end
-                        
+                        com_dst_node <= current_device_addr; // 01
+                        return_state <= STATE_SEND_COMMVER;
                         // Select byte and signal based on position
                         case (cmd_pos)
                             3'd0: begin
-                                com_tx_data <= CMD_COMMVER;         // Communication version command (0x13)
+                                com_tx_data <= CMD_COMMVER;          // Command revision command (0x11)
                                 com_tx_cmd_push <= 1'b1;            // Push as command
                                 main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
                             end
                             default: begin
                                 // All bytes sent, commit and transition
                                 com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
                                 main_state <= STATE_WAIT_RX;
-                                last_tx_state <= STATE_SEND_COMMVER;
                             end
                         endcase
                     end
@@ -1051,10 +1055,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     case (cmd_pos)
                         3'd0: begin
                             // Check REPORT byte
+                            com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
                             if (com_rx_byte == REPORT_NORMAL) begin
                                 $display("[CONTROLLER][STATE_PARSE_COMMVER] Report Normal");
                                 com_rx_next <= 1'b1;
-                                main_state <= STATE_TX_NEXT;
+                                main_state <= STATE_RX_NEXT;
                             end else begin
                                 $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for COMMVER", com_rx_byte);
                                 main_state <= STATE_SEND_FEATCHK;
@@ -1067,8 +1072,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 $display("[CONTROLLER][STATE_PARSE_COMMVER] COMVER is %02X", com_rx_byte);
                                 jvs_nodes_r.node_com_ver[current_device_addr - 1] <= com_rx_byte;
                                 com_rx_next <= 1'b1; // Advance to next byte
+                                main_state <= STATE_RX_NEXT;
                             end
-                            cmd_pos <= 3'd0;                  // Reset for next TX command
+                            cmd_pos <= 8'd0;                  // Reset for next TX command
                             main_state <= STATE_SEND_FEATCHK; // Proceed to next command
                         end
                         default: main_state <= STATE_SEND_FEATCHK; // Error, retry
@@ -1096,13 +1102,34 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             default: begin
                                 // All bytes sent, commit and transition
                                 com_commit <= 1'b1;
-                                cmd_pos <= 3'd0;
+                                cmd_pos <= 8'd0;
                                 main_state <= STATE_WAIT_RX;
-                                last_tx_state <= STATE_SEND_FEATCHK;
                             end
                         endcase
                     end
                 end
+
+                RX_PARSE_FEATURES: begin
+                    $display("[CONTROLLER][RX_PARSE_FEATURES] cmd_pos 0x%02X, rx_byte 0x%02X", cmd_pos, com_rx_byte);
+                    return_state <= RX_PARSE_FEATURES;
+                    case (cmd_pos)
+                        3'd0: begin
+                            // Check REPORT byte
+                            com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
+                            if (com_rx_byte == REPORT_NORMAL) begin
+                                $display("[CONTROLLER][RX_PARSE_FEATURES] Report Normal");
+                                com_rx_next <= 1'b1;
+                                return_state <= RX_PARSE_FEATURES;
+                                main_state <= STATE_RX_NEXT;
+                            end else begin
+                                $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for RX_PARSE_FEATURES", com_rx_byte);
+                                main_state <= STATE_FATAL_ERROR;
+                            end
+                        end
+                        default: main_state <= STATE_FATAL_ERROR;
+                    endcase
+                end
+
 
                 //-------------------------------------------------------------
                 // READ INPUTS COMMAND - Request current input states
@@ -1131,31 +1158,31 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             $display("[CONTROLLER] PROCESSING 0x%02X with Report %02X", com_src_cmd, com_rx_byte);
                             case (com_src_cmd)
                                 CMD_SETADDR: begin
-                                    cmd_pos <= 3'd0;
+                                    cmd_pos <= 8'd0;
                                     main_state <= STATE_PARSE_SETADDR;
                                 end
                                 CMD_IOIDENT: begin
-                                    cmd_pos <= 3'd0;
+                                    cmd_pos <= 8'd0;
                                     main_state <= STATE_PARSE_IOIDENT;     // ID read, get command revision
                                 end
                                 CMD_CMDREV: begin
-                                    cmd_pos <= 3'd0;                            // Start parsing with REPORT
+                                    cmd_pos <= 8'd0;                            // Start parsing with REPORT
                                     main_state <= STATE_PARSE_CMDREV;           // Parse CMDREV response
                                 end
                                 CMD_JVSREV: begin
-                                    cmd_pos <= 3'd0;                            // Start parsing with REPORT
+                                    cmd_pos <= 8'd0;                            // Start parsing with REPORT
                                     main_state <= STATE_PARSE_JVSREV;           // Parse JVSREV response
                                 end
                                 CMD_COMMVER: begin
-                                    cmd_pos <= 3'd0;                            // Start parsing with REPORT
+                                    cmd_pos <= 8'd0;                            // Start parsing with REPORT
                                     main_state <= STATE_PARSE_COMMVER;          // Parse COMMVER response
                                 end
                                 CMD_FEATCHK: begin
-                                    cmd_pos <= 3'd0;                           // Initialize parsing position
+                                    cmd_pos <= 8'd0;                           // Initialize parsing position
                                     main_state <= RX_PARSE_FEATURES;           // Parse feature data
                                 end
                                 CMD_SWINP: begin
-                                    cmd_pos <= 3'd0;                           // Initialize parsing position
+                                    cmd_pos <= 8'd0;                           // Initialize parsing position
                                     main_state <= RX_PARSE_INPUTS_START;
                                 end
                                 default: begin
@@ -1182,13 +1209,15 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end else begin
                         // Timeout handling - different strategies for different commands
                         case (com_src_cmd)
+                            /*
                             CMD_SETADDR: main_state <= STATE_FIRST_RESET;    // Critical - restart sequence
                             CMD_IOIDENT: main_state <= STATE_SEND_IOIDENT;     // Retry ID read
                             CMD_CMDREV: main_state <= STATE_SEND_CMDREV;     // Retry command revision
                             CMD_JVSREV: main_state <= STATE_SEND_JVSREV;     // Retry JVS revision
                             CMD_COMMVER: main_state <= STATE_SEND_COMMVER;   // Retry comm version
                             CMD_FEATCHK: main_state <= STATE_SEND_FEATCHK;   // Retry feature check
-                            default: main_state <= STATE_IDLE;               // Continue with polling
+                            */
+                            default: main_state <= STATE_FATAL_ERROR;               // Continue with polling
                         endcase
                     end
                 end
@@ -1302,111 +1331,54 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             com_tx_data_push <= 1'b1;           // Push as data
                         end
                     end
-                    main_state <= STATE_SEND_FINALIZE;
-                end
-
-                STATE_SEND_FINALIZE: begin
-                    // Commit and transmit frame using new jvs_com interface
-                    com_commit <= 1'b1;
-                    
-                    // Wait for response
-                    main_state <= STATE_WAIT_RX;
-                    last_tx_state <= STATE_SEND_INPUTS;
+                    main_state <= STATE_FATAL_ERROR;
                 end
 
                 //-------------------------------------------------------------
                 // GENERIC TX NEXT STATE - Handles pulse cleanup and position increment
                 //-------------------------------------------------------------
                 STATE_TX_NEXT: begin
+                    $display("[CONTROLLER][STATE_TX_NEXT] cmd:%b data:%b commit:%b", com_tx_cmd_push, com_tx_data_push, com_commit);
                     com_tx_cmd_push <= 1'b0;
                     com_tx_data_push <= 1'b0;
                     cmd_pos <= cmd_pos + 1;
-                    main_state <= return_state;
+                    if(com_commit == 1'b1) begin
+                        // Keep com_commit high until JVS_COM accepts it (tx_ready goes low)
+                        if(!com_tx_ready) begin
+                            // JVS_COM has accepted the commit (tx_ready went low)
+                            com_commit <= 1'b0;
+                            cmd_pos <= 8'h00;
+                            main_state <= STATE_WAIT_RX;
+                        end
+                        // else: keep com_commit high and stay in TX_NEXT until JVS_COM is ready
+                    end else begin
+                        main_state <= return_state;
+                    end
                 end
                 STATE_RX_NEXT: begin
+                    $display("[CONTROLLER][STATE_RX_NEXT]");
                     com_rx_next <= 0;
                     cmd_pos <= cmd_pos + 1;                    
                     main_state <= return_state;
                 end
 
                 //-------------------------------------------------------------
-                // PARSE FEATURE CHECK RESPONSE - Extract device capabilities
+                // FATAL ERROR STATE - Stop execution and display error
                 //-------------------------------------------------------------
-                RX_PARSE_FEATURES: begin
-                    // Feature check response format: [report] [func_data blocks] [00]
-                    // Each func_data block: [func_code] [param1] [param2] [param3]
-                    // Use cmd_pos to track parsing position within current feature block
-
-                    case (cmd_pos)
-                        3'd0: begin
-                            // Check if we have more data and not at terminator
-                            if (com_rx_remaining > 0 && com_rx_byte != 8'h00) begin
-                                // Store function code for processing
-                                case (com_rx_byte)
-                                    8'h01: begin // Input functions - switch inputs
-                                        com_rx_next <= 1'b1;
-                                        cmd_pos <= 3'd1;
-                                        return_state <= RX_PARSE_FEATURES;
-                                    end
-                                    default: begin // Other functions - skip 3 bytes (param1, param2, param3)
-                                        com_rx_next <= 1'b1;
-                                        cmd_pos <= 3'd4;
-                                        return_state <= RX_PARSE_FEATURES;
-                                    end
-                                endcase
-                            end else begin
-                                // End of feature data (0x00 terminator) or no more data
-                                jvs_data_ready_init <= 1'b1;  // Indicate initialization complete
-                                main_state <= STATE_IDLE;     // Start polling
-                            end
-                        end
-
-                        3'd1: begin // Parse switch input function (0x01)
-                            // Param1: number of players
-                            jvs_nodes_r.node_players[current_device_addr - 1] <= com_rx_byte[3:0];
-                            com_rx_next <= 1'b1;
-                            cmd_pos <= 3'd2;
-                        end
-                        3'd2: begin // Parse switch input function (0x01) - switches per player
-                            jvs_nodes_r.node_buttons[current_device_addr - 1] <= com_rx_byte;
-                            com_rx_next <= 1'b1;
-                            cmd_pos <= 3'd3;
-                        end
-                        3'd3: begin // Parse switch input function (0x01) - reserved, skip to next block
-                            com_rx_next <= 1'b1;
-                            cmd_pos <= 3'd0; // Back to start for next block
-                        end
-
-                        3'd4: begin // Skip bytes for unknown or unhandled functions
-                            com_rx_next <= 1'b1;
-                            cmd_pos <= 3'd5;
-                        end
-                        3'd5: begin
-                            com_rx_next <= 1'b1;
-                            cmd_pos <= 3'd6;
-                        end
-                        3'd6: begin
-                            com_rx_next <= 1'b1;
-                            cmd_pos <= 3'd0; // Back to start for next block
-                        end
-
-                        3'd7: begin // Skip remaining byte and return to start
-                            com_rx_next <= 1'b1;
-                            cmd_pos <= 3'd0;
-                        end
-                        // Reuse 3'd0-3'd7 pattern, using different offsets for different functions
-                        default: begin
-                            // Skip byte and continue
-                            com_rx_next <= 1'b1;
-                            cmd_pos <= 3'd0; // Reset to start for next block
-                        end
-                    endcase
+                STATE_FATAL_ERROR: begin
+                    // Stay in error state and continuously display error message
+                    $display("[CONTROLLER][FATAL_ERROR] JVS Controller has entered fatal error state");
+                    $display("[CONTROLLER][FATAL_ERROR] System stopped for debugging");
+                    $finish; // Stop simulation immediately for debugging
                 end
 
                 //-------------------------------------------------------------
-                // PARSE COMMAND REVISION RESPONSE - Check REPORT and extract revision
+                // DEFAULT - Unknown state, go to fatal error
                 //-------------------------------------------------------------
-                default: main_state <= STATE_IDLE;
+                default: begin
+                    $display("[CONTROLLER][FATAL_ERROR] Unknown state 0x%02X - entering fatal error state", main_state);
+                    main_state <= STATE_FATAL_ERROR;
+                end
             endcase
         end
     end
