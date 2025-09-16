@@ -122,6 +122,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
 
     // Coin counter outputs (up to 4 coin slots)
     output logic [15:0] coin_count[4],  // Coin counters for each slot (16-bit values)
+    output logic coin1,                 // Coin increase signal for slot 1
+    output logic coin2,                 // Coin increase signal for slot 2
+    output logic coin3,                 // Coin increase signal for slot 3
+    output logic coin4,                 // Coin increase signal for slot 4
     
     // GPIO control from SNAC
     input logic [7:0] gpio_output_value, // GPIO output value from SNAC (0x80=active, 0x00=inactive)
@@ -556,6 +560,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     // TX state management for sequential byte transmission
     logic [5:0] return_state;      // State to return to after TX_NEXT (6-bit for extended states)
     logic [7:0] cmd_pos;           // Position in current command sequence (was [2:0] - caused overflow)
+    logic [3:0] current_coin;      // Current coin slot being parsed (0-3)
+    
+    // Temporary variables for coin parsing
+    logic [1:0] temp_coin_condition;
+    logic [5:0] temp_counter_msb;
     
     // Timing and protocol control
     logic [31:0] delay_counter;    // Multi-purpose delay counter
@@ -1308,7 +1317,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 RX_PARSE_INPUTS_START: begin
                     $display("[CONTROLLER][RX_PARSE_INPUTS_START] Starting input parsing, cmd_pos=%d, rx_byte=0x%02X", cmd_pos, com_rx_byte);
                     if(com_src_cmd_status == STATUS_NORMAL) begin
-                        main_state <= RX_PARSE_INPUT_CMD;
+                        com_src_cmd_next <= 1'b1;
+                        com_rx_next <= 1'b1;
+                        main_state <= STATE_RX_NEXT;
+                        return_state <= RX_PARSE_INPUT_CMD;
                     end else begin
                         main_state <= STATE_FATAL_ERROR;
                     end
@@ -1746,6 +1758,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
+                                            current_coin <= 0; // Initialize coin counter for parsing
                                         end else begin
                                             $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for COININP", com_rx_byte);
                                             com_src_cmd_next <= 1'b1;
@@ -1757,9 +1770,8 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         end
                                     end
                                     3'd1: begin
-                                        // Dispatch to specialized COININP state
-                                        $display("[CONTROLLER] Dispatching to COININP specialized parser");
-                                        cmd_pos <= 0;
+                                        // Dispatch to specialized ANLINP state
+                                        $display("[CONTROLLER] Dispatching to ANLINP specialized parser");
                                         return_state <= RX_PARSE_COININP;
                                         main_state <= RX_PARSE_COININP;
                                     end
@@ -1967,7 +1979,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end else begin
                         // No more commands, input parsing complete
                         $display("[CONTROLLER] All input commands processed, returning to polling");
-                        main_state <= STATE_IDLE;
+                        main_state <= STATE_SEND_INPUTS;
                     end
                 end
                 
@@ -2090,57 +2102,59 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 RX_PARSE_COININP: begin
-                    $display("[CONTROLLER][RX_PARSE_COININP] Parsing coin data, cmd_pos=%d, rx_byte=0x%02X", cmd_pos, com_rx_byte);
-                    return_state <= RX_PARSE_COININP;
+                    $display("[CONTROLLER][RX_PARSE_COININP] Parsing coin data, cmd_pos=%d, rx_byte=0x%02X, current_coin=%d", cmd_pos, com_rx_byte, current_coin);
                     if (com_rx_remaining > 0) begin
-                        // Parse coin input data based on node configuration
-                        // REPORT byte already consumed by RX_PARSE_INPUT_CMD, start parsing from cmd_pos=1
-                        automatic logic [7:0] data_pos = cmd_pos - 1; // Adjust for REPORT byte
-                        automatic logic [3:0] slot_idx = data_pos / 2;
-                        automatic logic is_high_byte = (data_pos % 2) == 0;
-
-                        if (data_pos < (jvs_nodes.node_coin_slots[current_device_addr - 1] * 2)) begin // 2 bytes per coin slot
-                            if (is_high_byte) begin
-                                // High byte of coin counter
-                                case (slot_idx)
-                                    0: coin_count[0][15:8] <= com_rx_byte;
-                                    1: coin_count[1][15:8] <= com_rx_byte;
-                                    2: coin_count[2][15:8] <= com_rx_byte;
-                                    3: coin_count[3][15:8] <= com_rx_byte;
-                                endcase
-                                $display("[CONTROLLER] Coin slot %d high byte: 0x%02X", slot_idx, com_rx_byte);
-                            end else begin
-                                // Low byte of coin counter
-                                case (slot_idx)
-                                    0: coin_count[0][7:0] <= com_rx_byte;
-                                    1: coin_count[1][7:0] <= com_rx_byte;
-                                    2: coin_count[2][7:0] <= com_rx_byte;
-                                    3: coin_count[3][7:0] <= com_rx_byte;
-                                endcase
-                                $display("[CONTROLLER] Coin slot %d low byte: 0x%02X, count = %d", slot_idx, com_rx_byte,
-                                        (slot_idx == 0) ? {coin_count[0][15:8], com_rx_byte} :
-                                        (slot_idx == 1) ? {coin_count[1][15:8], com_rx_byte} :
-                                        (slot_idx == 2) ? {coin_count[2][15:8], com_rx_byte} :
-                                                         {coin_count[3][15:8], com_rx_byte});
+                        // Parse coin data (2 bytes per coin slot)
+                        case (cmd_pos)
+                            3'd1: begin // Parse byte 1 of current coin slot
+                                // Format: [condition(2 bits) counter_MSB(6 bits)]
+                                temp_coin_condition <= com_rx_byte[7:6];  // Top 2 bits = condition
+                                temp_counter_msb <= com_rx_byte[5:0];     // Bottom 6 bits = counter MSB
+                                $display("[CONTROLLER] Coin slot %d: condition=%d, msb=0x%02X", current_coin, com_rx_byte[7:6], com_rx_byte[5:0]);
+                                return_state <= RX_PARSE_COININP;
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
                             end
-                            main_state <= STATE_RX_NEXT;
-                            com_rx_next <= 1'b1;
-                        end else begin
-                            // Coin parsing complete, advance to next command
-                            $display("[CONTROLLER] Coin parsing complete, advancing to next command");
-                            cmd_pos <= 0;
-                            com_src_cmd_next <= 1'b1; // Advance to next command in FIFO
-                            return_state <= RX_PARSE_INPUT_CMD;
-                            main_state <= STATE_RX_NEXT;
-                            com_rx_next <= 1'b1;
-                        end
+                            3'd2: begin // Parse byte 2 of current coin slot then jump to next slot if needed
+                                // Store complete coin data for this slot
+                                coin_count[current_coin] <= {temp_counter_msb, com_rx_byte}; // 14-bit counter stored in 16-bit
+                                
+                                // Set coin increase signals based on condition (10 = increase)
+                                case (current_coin)
+                                    0: coin1 <= (temp_coin_condition == 2'b10);
+                                    1: coin2 <= (temp_coin_condition == 2'b10);
+                                    2: coin3 <= (temp_coin_condition == 2'b10);
+                                    3: coin4 <= (temp_coin_condition == 2'b10);
+                                endcase
+                                
+                                $display("[CONTROLLER] Coin slot %d: lsb=0x%02X, total=%d, increase=%b", 
+                                        current_coin, com_rx_byte, {temp_counter_msb, com_rx_byte}, (temp_coin_condition == 2'b10));
+                                
+                                // Check if we need to parse the next coin slot
+                                if (current_coin >= (jvs_nodes.node_coin_slots[current_device_addr - 1] - 1)) begin
+                                    // Coin parsing complete, advance to next command
+                                    $display("[CONTROLLER] Coin parsing complete, advancing to next command");
+                                    cmd_pos <= 0;
+                                    com_src_cmd_next <= 1'b1;
+                                    return_state <= RX_PARSE_INPUT_CMD;
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end else begin
+                                    // Parse next coin slot
+                                    current_coin <= current_coin + 1;
+                                    cmd_pos <= 0; // Reset to parse next coin's first byte
+                                    return_state <= RX_PARSE_COININP;
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end
+                            end
+                        endcase
                     end else begin
                         // No more data, return to command dispatcher
                         cmd_pos <= 0;
                         com_src_cmd_next <= 1'b1;
                         return_state <= RX_PARSE_INPUT_CMD;
-                        main_state <= STATE_RX_NEXT;
-                        com_rx_next <= 1'b1;
+                        main_state <= return_state;
                     end
                 end
 
@@ -2444,7 +2458,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 end
                                 CMD_SWINP: begin
                                     cmd_pos <= 8'd0;                           // Initialize parsing position
-                                    main_state <= RX_PARSE_INPUTS_START;       // Start parsing input responses
+                                    main_state <= RX_PARSE_SWINP;       // Start parsing input responses
                                 end
                                 default: begin
                                     main_state <= STATE_IDLE;
@@ -2468,6 +2482,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end else if (timeout_counter < RX_TIMEOUT_COUNT) begin  // 10ms timeout - fast for responsive gaming
                         timeout_counter <= timeout_counter + 1;
                     end else begin
+                        $display("[CONTROLLER] RX_IDLE Timeout");
                         // Timeout handling - different strategies for different commands
                         case (com_src_cmd)
                             /*
