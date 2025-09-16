@@ -176,36 +176,12 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     logic [7:0] com_frames_rx_count;
     logic [7:0] com_checksum_errors_count;
 
-    //=========================================================================
-    // COMMAND BUFFER SYSTEM - Sequential transmission with proper pulses
-    //=========================================================================
-    // Buffer to stack bytes and send them sequentially to jvs_com
-    typedef struct packed {
-        logic [7:0] data;      // Byte data
-        logic       is_cmd;    // 1=command byte, 0=data byte
-    } cmd_buffer_entry_t;
-    
-    localparam CMD_BUFFER_SIZE = 32;
-    cmd_buffer_entry_t cmd_buffer [0:CMD_BUFFER_SIZE-1];
-    logic [4:0] cmd_buffer_write_ptr;   // Write pointer (5-bit for overflow detection)
-    logic [4:0] cmd_buffer_read_ptr;    // Read pointer
-    logic [4:0] cmd_buffer_count;       // Number of entries in buffer
-    logic       cmd_buffer_sending;     // Currently sending buffered commands
-    logic [7:0] cmd_buffer_dst_node;    // Destination node for current buffer
-    
-    // Helper signals for buffer operations
-    logic       buffer_push_cmd;        // Pulse to push command byte
-    logic       buffer_push_data;       // Pulse to push data byte
-
     // Edge detection for RX complete signal
     logic       com_rx_complete_d;      // Delayed version for edge detection
     wire        com_rx_complete_negedge = com_rx_complete_d & ~com_rx_complete;
 
     // Name copying variables for device identification parsing
     logic [7:0] copy_write_idx;         // Write index for name copying
-    logic [7:0] buffer_push_byte;       // Byte to push
-    logic       buffer_commit;          // Pulse to start sending buffer
-    logic       buffer_ready;           // Buffer ready to accept new data
    
     logic [3:0] current_player;
 
@@ -218,9 +194,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
         .MASTER_CLK_FREQ(MASTER_CLK_FREQ),
         .JVS_BUFFER_SIZE(256)
     ) jvs_com_inst (
-        .clk_sys(~i_clk),
+        .clk_sys(i_clk),  // RX_NEXT/TX_NEXT states handle timing control
         .reset(i_rst),
-        .i_ena(1'b1),
+        .i_ena(i_ena),
 
         // UART Physical Interface
         .uart_rx(i_uart_rx),
@@ -479,87 +455,97 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     // STATE MACHINE DEFINITIONS
     //=========================================================================
     
-    // Main State Machine - Controls overall JVS protocol sequence
-    localparam STATE_IDLE = 6'h00;             // Idle state - continuous input polling
-    localparam STATE_WAIT_RX = 6'h01;         // Wait for device response
-    localparam STATE_INIT_DELAY = 6'h02;       // Initial delay for system stabilization
-    localparam STATE_FIRST_RESET = 6'h03;      // Send first reset command
-    localparam STATE_FIRST_RESET_DELAY = 6'h04; // Delay after first reset
-    localparam STATE_SECOND_RESET = 6'h05;     // Send second reset command
-    localparam STATE_SECOND_RESET_DELAY = 6'h06; // Delay after second reset
-    localparam STATE_SEND_SETADDR = 6'h07;     // Send address assignment command
-    localparam STATE_PARSE_SETADDR = 6'h08; // Parse CMDREV response (REPORT + revision data)
-    localparam STATE_SEND_IOIDENT = 6'h09;      // Send device ID request
-    localparam STATE_PARSE_IOIDENT = 6'h0A; // Parse CMDREV response (REPORT + revision data)
-    localparam STATE_SEND_CMDREV = 6'h0B;      // Send command revision request
-    localparam STATE_PARSE_CMDREV = 6'h0C; // Parse CMDREV response (REPORT + revision data)
-    localparam STATE_SEND_JVSREV = 6'h0D;      // Send JVS revision request
-    localparam STATE_PARSE_COMMVER = 6'h0E; // Parse COMMVER response (REPORT + version data)
-    localparam STATE_PARSE_JVSREV = 6'h0F; // Parse JVSREV response (REPORT + revision data)
-    localparam STATE_SEND_COMMVER = 6'h10;     // Send communications version request
-    localparam STATE_SEND_FEATCHK = 6'h11;     // Send feature check request
-    localparam STATE_SEND_INPUTS = 6'h12;      // Send input state request (start progressive build)
-    // INPUT BUILDING SUB-STATES - Progressive frame construction
-    localparam STATE_SEND_INPUTS_SWITCH = 6'h13;   // Add switch inputs if available
-    localparam STATE_SEND_INPUTS_COIN = 6'h14;     // Add coin inputs if available
-    localparam STATE_SEND_INPUTS_ANALOG = 6'h15;   // Add analog inputs if available
-    localparam STATE_SEND_INPUTS_ROTARY = 6'h16;   // Add rotary inputs if available
-    localparam STATE_SEND_INPUTS_KEYCODE = 6'h17;  // Add keycode inputs if available
-    localparam STATE_SEND_INPUTS_SCREEN = 6'h18;   // Add screen position inputs if available
-    localparam STATE_SEND_INPUTS_MISC = 6'h19;     // Add misc inputs if available
-    localparam STATE_SEND_OUTPUT_DIGITAL = 6'h1A; // Send output digital command for GPIO
-    localparam STATE_SEND_FINALIZE = 6'h1B;       // Finalize multi-command frame with commit
-    localparam STATE_FIRST_RESET_ARG = 6'h1C; // Push reset argument and commit (FIXED CONFLICT)
-    localparam STATE_SECOND_RESET_ARG = 6'h1D; // Push second reset argument and commit (FIXED CONFLICT)
-    localparam STATE_TX_NEXT = 6'h1E; // Generic state for pulse handling and counter increment
-    localparam STATE_RX_NEXT = 6'h1F; // Generic state for pulse handling and counter increment
-    localparam STATE_FATAL_ERROR = 6'h20; // Fatal error state - stops execution with error message
-
-    // RS485 State Machine - Controls transceiver direction with proper timing
-    localparam RS485_RECEIVE = 2'b00;         // Receive mode (default)
-    localparam RS485_TX_SETUP = 2'b01;        // Setup time before transmission
-    localparam RS485_TRANSMIT = 2'b10;        // Active transmission mode
-    localparam RS485_TX_HOLD = 2'b11;         // Hold time after transmission
-
-    // RX State Machine - Processes incoming JVS frames byte by byte
-    localparam RX_IDLE = 3'h0;                // Waiting for sync byte
-    localparam RX_READ_ADDR = 3'h1;           // Reading address byte
-    localparam RX_READ_SIZE = 3'h2;           // Reading length byte
-    localparam RX_READ_DATA = 3'h3;           // Reading data bytes and checksum
-    localparam RX_UNESCAPE = 3'h4;            // Copy from raw buffer to final buffer, processing escapes
-    localparam RX_PROCESS = 3'h5;             // Processing complete and unescaped frame
-    localparam RX_COPY_NAME = 3'h6;           // Copy node name from response data
-    localparam RX_PARSE_FEATURES = 6'h21;     // Parse feature/capability data
-    localparam RX_PARSE_FEATURES_FUNCS = 6'h22;     // Parse feature/capability data
+    //=========================================================================
+    // MAIN JVS PROTOCOL STATE MACHINE (6-bit states)
+    // Controls overall JVS protocol sequence from initialization to input polling
+    //=========================================================================
     
-    // Additional RX states for input parsing (converted to 6-bit)
-    localparam RX_PARSE_INPUTS_START = 6'h30;   // Initialize input response parsing
-    localparam RX_PARSE_INPUT_CMD = 6'h31;      // Dispatch to appropriate parser based on command
-    localparam RX_PARSE_SWINP = 6'h32;          // Parse switch inputs data
-    localparam RX_PARSE_SWINP_PLAYER = 6'h33;   // Parse individual player SWINP data (recursive)
-    localparam RX_PARSE_COININP = 6'h34;        // Parse coin inputs data
-    localparam RX_PARSE_ANLINP = 6'h35;         // Parse analog inputs data
-    localparam RX_PARSE_ANLINP_DATA = 6'h36;    // Parse analog inputs channel ANLINP data (recursive)
-    localparam RX_PARSE_ROTINP = 6'h37;         // Parse rotary inputs data
-    localparam RX_PARSE_KEYINP = 6'h38;         // Parse keycode inputs data
-    localparam RX_PARSE_SCRPOSINP = 6'h39;      // Parse screen position inputs data
-    localparam RX_PARSE_MISCSWINP = 6'h3A;      // Parse misc digital inputs data
-    localparam RX_PARSE_OUTPUT1 = 6'h3B;        // Parse output digital response
-    localparam RX_PARSE_INPUTS_COMPLETE = 6'h3C; // Complete parsing and return to idle
-    // Legacy feature parsing states (may be unused now, moved to avoid conflicts)
-    localparam RX_PARSE_FUNC_DIGITAL = 6'h23;      // Parse digital input function parameters
-    localparam RX_PARSE_FUNC_COIN = 6'h24;         // Parse coin input function parameters
-    localparam RX_PARSE_FUNC_ANALOG = 6'h25;       // Parse analog input function parameters
-    localparam RX_PARSE_FUNC_ROTARY = 6'h26;       // Parse rotary input function parameters
-    localparam RX_PARSE_FUNC_SCREEN = 6'h27;       // Parse screen position function parameters
-    localparam RX_PARSE_FUNC_MISC = 6'h28;         // Parse misc digital function parameters
+    // INITIALIZATION SEQUENCE STATES (5.4s + 2s + 0.5s delays)
+    localparam STATE_IDLE = 6'h00;             // Idle state - continuous input polling (1ms interval)
+    localparam STATE_INIT_DELAY = 6'h02;       // Initial 5.4s delay for system stabilization
+    localparam STATE_FIRST_RESET = 6'h03;      // Send first reset command (F0 D9)
+    localparam STATE_FIRST_RESET_DELAY = 6'h04; // 2-second delay after first reset
+    localparam STATE_SECOND_RESET = 6'h05;     // Send second reset command for reliability
+    localparam STATE_SECOND_RESET_DELAY = 6'h06; // 0.5-second delay after second reset
+    
+    // DEVICE DISCOVERY SEQUENCE STATES
+    localparam STATE_SEND_SETADDR = 6'h07;     // Send address assignment command (F1 01)
+    localparam STATE_PARSE_SETADDR = 6'h08;    // Parse address assignment response
+    localparam STATE_SEND_IOIDENT = 6'h09;     // Send device identification request (10)
+    localparam STATE_PARSE_IOIDENT = 6'h0A;    // Parse device ID string response
+    localparam STATE_SEND_CMDREV = 6'h0B;      // Send command revision request (11)
+    localparam STATE_PARSE_CMDREV = 6'h0C;     // Parse command revision response (BCD format)
+    localparam STATE_SEND_JVSREV = 6'h0D;      // Send JVS revision request (12)
+    localparam STATE_PARSE_JVSREV = 6'h0F;     // Parse JVS revision response (BCD format)
+    localparam STATE_SEND_COMMVER = 6'h10;     // Send communications version request (13)
+    localparam STATE_PARSE_COMMVER = 6'h0E;    // Parse communications version response (BCD format)
+    localparam STATE_SEND_FEATCHK = 6'h11;     // Send feature check request (14)
+    
+    // GENERIC FLOW CONTROL STATES
+    localparam STATE_WAIT_RX = 6'h01;          // Wait for device response with 1s timeout
+    
+    // INPUT POLLING SEQUENCE STATES (chained command construction)
+    localparam STATE_SEND_INPUTS = 6'h12;         // Start input polling sequence
+    localparam STATE_SEND_INPUTS_SWITCH = 6'h13;  // Add switch/button inputs (20) if available
+    localparam STATE_SEND_INPUTS_COIN = 6'h14;    // Add coin inputs (21) if available
+    localparam STATE_SEND_INPUTS_ANALOG = 6'h15;  // Add analog inputs (22) if available (joysticks)
+    localparam STATE_SEND_INPUTS_ROTARY = 6'h16;  // Add rotary inputs (23) if available
+    localparam STATE_SEND_INPUTS_KEYCODE = 6'h17; // Add keycode inputs (24) if available
+    localparam STATE_SEND_INPUTS_SCREEN = 6'h18;  // Add screen position (25) if available (light gun)
+    localparam STATE_SEND_INPUTS_MISC = 6'h19;    // Add misc inputs (26) if available
+    localparam STATE_SEND_OUTPUT_DIGITAL = 6'h1A; // Send digital output command (32) for GPIO
+    localparam STATE_SEND_FINALIZE = 6'h1B;       // Finalize chained command frame and transmit
+    
+    // RESET ARGUMENT STATES (for double reset sequence)
+    localparam STATE_FIRST_RESET_ARG = 6'h1C;     // Push first reset argument (D9) and commit
+    localparam STATE_SECOND_RESET_ARG = 6'h1D;    // Push second reset argument (D9) and commit
+    
+    // GENERIC HELPER STATES
+    localparam STATE_TX_NEXT = 6'h1E;             // Generic TX byte advance state
+    localparam STATE_RX_NEXT = 6'h1F;             // Generic RX byte advance state
+    localparam STATE_FATAL_ERROR = 6'h20;         // Fatal error state - stops execution
+
+    //=========================================================================
+    // RX PARSING STATES (6-bit states for complex response handling)
+    // These states handle parsing of JVS command responses
+    //=========================================================================
+    
+    // FEATURE PARSING STATES
+    localparam RX_PARSE_FEATURES = 6'h21;      // Parse device feature/capability data (14 response)
+    localparam RX_PARSE_FEATURES_FUNCS = 6'h22; // Parse individual function capabilities
+    localparam RX_PARSE_FUNC_DIGITAL = 6'h23;  // Parse digital input function parameters
+    localparam RX_PARSE_FUNC_COIN = 6'h24;     // Parse coin input function parameters
+    localparam RX_PARSE_FUNC_ANALOG = 6'h25;   // Parse analog input function parameters
+    localparam RX_PARSE_FUNC_ROTARY = 6'h26;   // Parse rotary input function parameters
+    localparam RX_PARSE_FUNC_SCREEN = 6'h27;   // Parse screen position function parameters
+    localparam RX_PARSE_FUNC_MISC = 6'h28;     // Parse misc digital function parameters
+
     localparam RX_PARSE_FUNC_CARD = 6'h29;         // Parse card system function parameters
     localparam RX_PARSE_FUNC_HOPPER = 6'h2A;       // Parse hopper function parameters
     localparam RX_PARSE_FUNC_OUT_DIGITAL = 6'h2B;  // Parse output digital function parameters
     localparam RX_PARSE_FUNC_OUT_ANALOG = 6'h2C;   // Parse output analog function parameters
     localparam RX_PARSE_FUNC_CHAR = 6'h2D;         // Parse character display function parameters
-    localparam RX_SKIP_FUNC_PARAMS = 6'h2E;        // Skip 3 function parameters and continue
 
+    // INPUT DATA PARSING STATES (chained command response handling)
+    localparam RX_PARSE_INPUTS_START = 6'h30;   // Initialize chained input response parsing
+    localparam RX_PARSE_INPUT_CMD = 6'h31;      // Dispatch to parser based on command in FIFO
+    localparam RX_PARSE_INPUTS_COMPLETE = 6'h3C; // Complete chained parsing, return to polling
+
+    // DATA I/O COMMANDS
+    localparam RX_PARSE_SWINP = 6'h32;          // Parse switch/button inputs (20) response
+    localparam RX_PARSE_SWINP_PLAYER = 6'h33;   // Parse per-player switch data (recursive)
+    localparam RX_PARSE_COININP = 6'h34;        // Parse coin inputs (21) response
+    localparam RX_PARSE_ANLINP = 6'h35;         // Parse analog inputs (22) response
+    localparam RX_PARSE_ANLINP_DATA = 6'h36;    // Parse per-channel analog data (recursive)
+    localparam RX_PARSE_ROTINP = 6'h37;         // Parse rotary inputs (23) response
+    localparam RX_PARSE_KEYINP = 6'h38;         // Parse keycode inputs (24) response
+    localparam RX_PARSE_SCRPOSINP = 6'h39;      // Parse screen position (25) response (light gun)
+    localparam RX_PARSE_MISCSWINP = 6'h3A;      // Parse misc digital inputs (26) response
+    // OUTPUT COMMANDS
+    localparam RX_PARSE_OUTPUT1 = 6'h3B;        // Parse digital output (32) response
+    
+    
+    
     //=========================================================================
     // STATE VARIABLES AND CONTROL REGISTERS
     //=========================================================================
@@ -1212,6 +1198,14 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1][15:8] <= com_rx_byte;
                                         $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Misc digital: MSB=0x%02X", com_rx_byte);
                                     end
+                                    FUNC_OUTPUT_CARD: begin
+                                        jvs_nodes_r.node_card_system_slots[current_device_addr - 1] <= com_rx_byte;
+                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] %d Cards system present", com_rx_byte);
+                                    end
+                                    FUNC_OUTPUT_HOPPER: begin
+                                        jvs_nodes_r.node_medal_hopper_channels[current_device_addr - 1] <= com_rx_byte;
+                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] %d Medal Hopper channels", com_rx_byte);
+                                    end
                                     FUNC_OUTPUT_DIGITAL: begin
                                         jvs_nodes_r.node_digital_outputs[current_device_addr - 1] <= com_rx_byte;
                                         $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Digital outputs: %d channels", com_rx_byte);
@@ -1219,6 +1213,15 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     FUNC_OUTPUT_ANALOG: begin
                                         jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] <= com_rx_byte[3:0];
                                         $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Analog outputs: %d channels", com_rx_byte[3:0]);
+                                    end
+                                    FUNC_OUTPUT_CHAR: begin
+                                        jvs_nodes_r.node_has_char_display[current_device_addr - 1] <= 1'b1;
+                                        jvs_nodes_r.node_char_display_width[current_device_addr - 1] <= com_rx_byte;
+                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Character display: %d width", com_rx_byte);
+                                    end
+                                    FUNC_OUTPUT_BACKUP: begin
+                                        jvs_nodes_r.node_has_backup[current_device_addr - 1] <= 1'b1;
+                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Backup present");
                                     end
                                     default: begin
                                         $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Unknown function 0x%02X, arg1=0x%02X", current_func_code, com_rx_byte);
@@ -1262,6 +1265,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             3'd4: begin // ARG3
                                 $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Parsing arg3 0x%02X for func 0x%02X", com_rx_byte, current_func_code);
                                 case (current_func_code)
+                                    FUNC_INPUT_SCREEN_POS: begin
+                                        jvs_nodes_r.node_screen_pos_channels[current_device_addr - 1] <= com_rx_byte;
+                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Screen: %d channels", com_rx_byte);
+                                    end
                                     FUNC_OUTPUT_CHAR: begin
                                         jvs_nodes_r.node_char_display_type[current_device_addr - 1] <= com_rx_byte;
                                         $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Character display: type 0x%02X", com_rx_byte);
@@ -1311,8 +1318,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             com_src_cmd_next <= 1'b1;
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             cmd_pos <= 0;
-                                            main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
+                                            //main_state <= STATE_RX_NEXT;
+                                            main_state <= STATE_FATAL_ERROR; // for now we stop the simulation @TODO: proper error handeling
                                         end
                                     end
                                     3'd1: begin
@@ -1339,8 +1347,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             com_src_cmd_next <= 1'b1;
                                             cmd_pos <= 0;
                                             return_state <= RX_PARSE_INPUT_CMD;
-                                            main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
+                                            //main_state <= STATE_RX_NEXT;
+                                            main_state <= STATE_FATAL_ERROR; // for now we stop the simulation @TODO: proper error handeling
                                         end
                                     end
                                     3'd1: begin
