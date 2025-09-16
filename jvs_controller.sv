@@ -2003,7 +2003,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     if (com_tx_ready) begin
                         // Set destination node
                         com_dst_node <= current_device_addr; // 01
-                        
+
+                        // Reset cmd_pos for new polling cycle
+                        cmd_pos <= 8'd0;
+
                         // Begin progressive state machine - start with switch inputs
                         main_state <= STATE_SEND_INPUTS_SWITCH;
                     end
