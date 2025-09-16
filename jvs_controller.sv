@@ -184,7 +184,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     logic [7:0] copy_write_idx;         // Write index for name copying
    
     logic [3:0] current_player;
-
+    logic [7:0] current_channel;
     //=========================================================================
     // JVS COMMUNICATION MODULE INSTANCE
     //=========================================================================
@@ -494,6 +494,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     localparam STATE_SEND_INPUTS_SCREEN = 6'h18;  // Add screen position (25) if available (light gun)
     localparam STATE_SEND_INPUTS_MISC = 6'h19;    // Add misc inputs (26) if available
     localparam STATE_SEND_OUTPUT_DIGITAL = 6'h1A; // Send digital output command (32) for GPIO
+    localparam STATE_SEND_OUTPUT_ANALOG = 6'h3C; // Send digital output command (32) for GPIO
     localparam STATE_SEND_FINALIZE = 6'h1B;       // Finalize chained command frame and transmit
     
     // RESET ARGUMENT STATES (for double reset sequence)
@@ -1288,6 +1289,20 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 //-------------------------------------------------------------
+                // READ INPUTS COMMAND - Request current input states
+                //-------------------------------------------------------------
+                STATE_SEND_INPUTS: begin
+                    // Send input commands using new jvs_com interface
+                    if (com_tx_ready) begin
+                        // Set destination node
+                        com_dst_node <= current_device_addr; // 01
+                        
+                        // Begin progressive state machine - start with switch inputs
+                        main_state <= STATE_SEND_INPUTS_SWITCH;
+                    end
+                end
+
+                //-------------------------------------------------------------
                 // INPUT PARSING STATES - Parse input response data
                 //-------------------------------------------------------------
                 RX_PARSE_INPUTS_START: begin
@@ -1297,6 +1312,395 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end else begin
                         main_state <= STATE_FATAL_ERROR;
                     end
+                end
+
+                //-------------------------------------------------------------
+                // INPUT BUILDING PROGRESSIVE STATES
+                //-------------------------------------------------------------
+                STATE_SEND_INPUTS_SWITCH: begin
+                    if (jvs_nodes.node_players[current_device_addr - 1] > 0) begin
+                        // Send SWINP command using sequential byte transmission
+                        if (com_tx_ready) begin
+                            // Initialize command parameters on first entry
+                            if (cmd_pos == 0) begin
+                                com_dst_node <= current_device_addr;
+                                return_state <= STATE_SEND_INPUTS_SWITCH;
+                            end
+
+                            // Select byte and signal based on position
+                            case (cmd_pos)
+                                3'd0: begin
+                                    com_tx_data <= CMD_SWINP;         // SWINP command (0x20)
+                                    com_tx_cmd_push <= 1'b1;         // Push as command
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                3'd1: begin
+                                    com_tx_data <= jvs_nodes.node_players[current_device_addr - 1];  // Number of players
+                                    com_tx_data_push <= 1'b1;        // Push as data
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                3'd2: begin
+                                    com_tx_data <= (jvs_nodes.node_buttons[current_device_addr - 1] + 7) / 8; // Bytes for buttons
+                                    com_tx_data_push <= 1'b1;        // Push as data
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                default: begin
+                                    // All bytes sent, commit and transition
+                                    //com_commit <= 1'b1;
+                                    cmd_pos <= 8'd0;
+                                    main_state <= STATE_SEND_INPUTS_COIN;
+                                end
+                            endcase
+                        end
+                    end else begin
+                        main_state <= STATE_SEND_INPUTS_COIN;
+                    end
+                end
+                STATE_SEND_INPUTS_COIN: begin // (CMD_COININP) @TODO: (CMD_COINDEC),(COININC)
+                    if (jvs_nodes.node_coin_slots[current_device_addr - 1] > 0) begin
+                        // Send COININP command using sequential byte transmission
+                        if (com_tx_ready) begin
+                            // Initialize command parameters on first entry
+                            if (cmd_pos == 0) begin
+                                com_dst_node <= current_device_addr;
+                                return_state <= STATE_SEND_INPUTS_COIN;
+                            end
+
+                            // Select byte and signal based on position
+                            case (cmd_pos)
+                                3'd0: begin
+                                    com_tx_data <= CMD_COININP;       // COININP command (0x21)
+                                    com_tx_cmd_push <= 1'b1;         // Push as command
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                3'd1: begin
+                                    com_tx_data <= jvs_nodes.node_coin_slots[current_device_addr - 1]; // Number of coin slots
+                                    com_tx_data_push <= 1'b1;        // Push as data
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                default: begin
+                                    // All bytes sent, commit and transition
+                                    //com_commit <= 1'b1;
+                                    cmd_pos <= 8'd0;
+                                    main_state <= STATE_SEND_INPUTS_ANALOG;
+                                end
+                            endcase
+                        end
+                    end else begin
+                        main_state <= STATE_SEND_INPUTS_ANALOG;
+                    end
+                end
+                STATE_SEND_INPUTS_ANALOG: begin
+                    if (jvs_nodes.node_analog_channels[current_device_addr - 1] > 0) begin
+                        // Send ANLINP command using sequential byte transmission
+                        if (com_tx_ready) begin
+                            // Initialize command parameters on first entry
+                            if (cmd_pos == 0) begin
+                                com_dst_node <= current_device_addr;
+                                return_state <= STATE_SEND_INPUTS_ANALOG;
+                            end
+
+                            // Select byte and signal based on position
+                            case (cmd_pos)
+                                3'd0: begin
+                                    com_tx_data <= CMD_ANLINP;        // ANLINP command (0x22)
+                                    com_tx_cmd_push <= 1'b1;         // Push as command
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                3'd1: begin
+                                    com_tx_data <= jvs_nodes.node_analog_channels[current_device_addr - 1]; // Number of analog channels
+                                    com_tx_data_push <= 1'b1;        // Push as data
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                default: begin
+                                    // All bytes sent, commit and transition
+                                    //com_commit <= 1'b1;
+                                    cmd_pos <= 8'd0;
+                                    main_state <= STATE_SEND_INPUTS_ROTARY;
+                                end
+                            endcase
+                        end
+                    end else begin
+                        main_state <= STATE_SEND_INPUTS_ROTARY;
+                    end
+                end
+                STATE_SEND_INPUTS_ROTARY: begin
+                    if (jvs_nodes.node_rotary_channels[current_device_addr - 1] > 0) begin
+                        // Send ROTINP command using sequential byte transmission
+                        if (com_tx_ready) begin
+                            // Initialize command parameters on first entry
+                            if (cmd_pos == 0) begin
+                                com_dst_node <= current_device_addr;
+                                return_state <= STATE_SEND_INPUTS_ROTARY;
+                            end
+
+                            // Select byte and signal based on position
+                            case (cmd_pos)
+                                3'd0: begin
+                                    com_tx_data <= CMD_ROTINP;        // ROTINP command (0x23)
+                                    com_tx_cmd_push <= 1'b1;         // Push as command
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                3'd1: begin
+                                    com_tx_data <= jvs_nodes.node_rotary_channels[current_device_addr - 1]; // Number of rotary channels
+                                    com_tx_data_push <= 1'b1;        // Push as data
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                default: begin
+                                    // All bytes sent, commit and transition
+                                    //com_commit <= 1'b1;
+                                    cmd_pos <= 8'd0;
+                                    main_state <= STATE_SEND_INPUTS_KEYCODE;
+                                end
+                            endcase
+                        end
+                    end else begin
+                        main_state <= STATE_SEND_INPUTS_KEYCODE;
+                    end
+                end
+                STATE_SEND_INPUTS_KEYCODE: begin
+                    if (jvs_nodes.node_has_keycode_input[current_device_addr - 1]) begin
+                        // Send KEYINP command using sequential byte transmission (no parameters)
+                        if (com_tx_ready) begin
+                            // Initialize command parameters on first entry
+                            if (cmd_pos == 0) begin
+                                com_dst_node <= current_device_addr;
+                                return_state <= STATE_SEND_INPUTS_KEYCODE;
+                            end
+
+                            // Select byte and signal based on position
+                            case (cmd_pos)
+                                3'd0: begin
+                                    com_tx_data <= CMD_KEYINP;        // KEYINP command (0x24)
+                                    com_tx_cmd_push <= 1'b1;         // Push as command
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                default: begin
+                                    // All bytes sent, commit and transition
+                                    //com_commit <= 1'b1;
+                                    cmd_pos <= 8'd0;
+                                    main_state <= STATE_SEND_INPUTS_SCREEN;
+                                end
+                            endcase
+                        end
+                    end else begin
+                        main_state <= STATE_SEND_INPUTS_SCREEN;
+                    end
+                end
+                STATE_SEND_INPUTS_SCREEN: begin
+                    if (jvs_nodes.node_has_screen_pos[current_device_addr - 1]) begin
+                        // Send SCRPOSINP command using sequential byte transmission
+                        if (com_tx_ready) begin
+                            // Initialize command parameters on first entry
+                            if (cmd_pos == 0) begin
+                                com_dst_node <= current_device_addr;
+                                return_state <= STATE_SEND_INPUTS_SCREEN;
+                            end
+
+                            // Select byte and signal based on position
+                            case (cmd_pos)
+                                3'd0: begin
+                                    com_tx_data <= CMD_SCRPOSINP;     // SCRPOSINP command (0x25)
+                                    com_tx_cmd_push <= 1'b1;         // Push as command
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                3'd1: begin
+                                    com_tx_data <= 8'h01;            // Channel index
+                                    com_tx_data_push <= 1'b1;        // Push as data
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                default: begin
+                                    // All bytes sent, commit and transition
+                                    //com_commit <= 1'b1;
+                                    cmd_pos <= 8'd0;
+                                    main_state <= STATE_SEND_INPUTS_MISC;
+                                end
+                            endcase
+                        end
+                    end else begin
+                        main_state <= STATE_SEND_INPUTS_MISC;
+                    end
+                end
+                STATE_SEND_INPUTS_MISC: begin
+                    if (jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] > 0) begin
+                        // Send MISCSWINP command using sequential byte transmission
+                        if (com_tx_ready) begin
+                            // Initialize command parameters on first entry
+                            if (cmd_pos == 0) begin
+                                com_dst_node <= current_device_addr;
+                                return_state <= STATE_SEND_INPUTS_MISC;
+                            end
+
+                            // Select byte and signal based on position
+                            case (cmd_pos)
+                                3'd0: begin
+                                    com_tx_data <= CMD_MISCSWINP;     // MISCSWINP command (0x26)
+                                    com_tx_cmd_push <= 1'b1;         // Push as command
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                3'd1: begin
+                                    com_tx_data <= (jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] + 7) / 8; // Bytes needed
+                                    com_tx_data_push <= 1'b1;        // Push as data
+                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                end
+                                default: begin
+                                    // All bytes sent, commit and transition
+                                    //com_commit <= 1'b1;
+                                    cmd_pos <= 8'd0;
+                                    main_state <= STATE_SEND_OUTPUT_DIGITAL;
+                                end
+                            endcase
+                        end
+                    end else begin
+                        main_state <= STATE_SEND_OUTPUT_DIGITAL;
+                    end
+                end
+                // @TODO: Card system not supported
+                // @TODO: Medal Hopper not supported (CMD_PAYCNT),(PAYINC),
+                STATE_SEND_OUTPUT_DIGITAL: begin // (CMD_OUTPUT1) @TODO: (CMD_OUTPUT2),(CMD_OUTPUT3)
+                    // Check if device has digital outputs
+                    if (jvs_nodes.node_digital_outputs[current_device_addr - 1] > 0) begin
+                        if (jvs_nodes.node_players[current_device_addr - 1] == 1) begin
+                            // Send OUTPUT1 command using sequential byte transmission
+                            if (com_tx_ready) begin
+                                // Initialize command parameters on first entry
+                                if (cmd_pos == 0) begin
+                                    com_dst_node <= current_device_addr;
+                                    return_state <= STATE_SEND_OUTPUT_DIGITAL;
+                                end
+
+                                // Select byte and signal based on position
+                                case (cmd_pos)
+                                    3'd0: begin
+                                        com_tx_data <= CMD_OUTPUT1;       // OUTPUT1 command (0x32)
+                                        com_tx_cmd_push <= 1'b1;         // Push as command
+                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                    end
+                                    3'd1: begin
+                                        com_tx_data <= 8'h03;            // send 3 bytes
+                                        com_tx_data_push <= 1'b1;        // Push as data
+                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                    end
+                                    3'd2: begin
+                                        com_tx_data <= gpio_output_value; // Set GPIO1 to current value from SNAC
+                                        com_tx_data_push <= 1'b1;        // Push as data
+                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                    end
+                                    3'd3: begin
+                                        com_tx_data <= 8'hA0;            // do not know what A is for, but taken from TC4 capture
+                                        com_tx_data_push <= 1'b1;        // Push as data
+                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                    end
+                                    3'd4: begin
+                                        com_tx_data <= 8'h00;
+                                        com_tx_data_push <= 1'b1;        // Push as data
+                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                    end
+                                    default: begin
+                                        // All bytes sent, transition to finalize
+                                        cmd_pos <= 8'd0;
+                                        main_state <= STATE_SEND_OUTPUT_ANALOG;
+                                    end
+                                endcase
+                            end
+                        end else begin
+                            main_state <= STATE_SEND_OUTPUT_ANALOG;
+                        end
+                    end else begin
+                        main_state <= STATE_SEND_OUTPUT_ANALOG;
+                    end
+                end
+                // @TODO: Analog Output not supported (CMD_ANLOUT)
+                STATE_SEND_OUTPUT_ANALOG: begin // (CMD_ANLOUT)
+                    // Check if device has digital outputs
+                    if (jvs_nodes.node_digital_outputs[current_device_addr - 1] > 0) begin
+                        if(com_tx_ready) begin
+                               // Initialize command parameters on first entry
+                                if (cmd_pos == 0) begin
+                                    com_dst_node <= current_device_addr;
+                                    return_state <= STATE_SEND_OUTPUT_ANALOG;
+                                end
+                                case (cmd_pos)
+                                    3'd0: begin
+                                        current_channel <= 0;
+                                        com_tx_data <= CMD_ANLOUT;       // OUTPUT1 command (0x33)
+                                        com_tx_cmd_push <= 1'b1;         // Push as command
+                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                    end
+                                    3'd1: begin
+                                        com_tx_data <= 8'h01;       // Number of channel to send
+                                        com_tx_data_push <= 1'b1;
+                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                    end
+                                    3'd2: begin
+                                        com_tx_data <= 8'h00;           // Channel N MSB (@TODO: send null value at the momment)
+                                        com_tx_data_push <=1'b1 ;       // Push data
+                                        main_state <= STATE_TX_NEXT;    // Go to TX_NEXT
+                                    end
+                                    3'd3: begin
+                                        com_tx_data <= 8'h00;            // Channel N LSB (@TODO: send null value at the momment)
+                                        com_tx_data_push <= 1'b1;       // Push data
+                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                        current_channel <= current_channel + 1;
+                                        cmd_pos <= 1; // Go back to "3'd2" after increased by TX_NEXT
+                                    end
+                                endcase
+                                if(current_channel > jvs_nodes.node_digital_outputs[current_device_addr - 1] - 1) begin
+                                    main_state <= STATE_SEND_FINALIZE;
+                                end
+                        end else begin
+                            main_state <= STATE_SEND_FINALIZE;
+                        end
+                    end else begin
+                        main_state <= STATE_SEND_FINALIZE;
+                    end
+                end
+                /*
+                Command name
+                    Analog Outputs
+                    byte0
+                    byte1
+                    byte2
+                    byte3
+                    ...
+                    byteN
+                    Request Data
+                    33, channel, data, ...
+                    33
+                    Command Code
+                    (02)
+                    Channel count
+                    (18)
+                    Channel 1 MSB
+                    (01)
+                    Channel 1 LSB
+                    ...
+                    ...
+                    (4A)
+                    Last Channel LSB
+                    Response Data
+                    01 (report)
+                    (01)
+                    –
+                    –
+                    –
+                    –
+                    –
+                    Report
+                    Outputs data to analog outputs. Analog data is always specified as 16 bits, with the valid bits being
+                    moved to the top, and the remainder set to 0. In this way, main board software does not need to know the
+                    precision of the analog data.
+                */
+                // @TODO: Characters Output not supported (CHAROUT)
+                // @TODO: Backup not support
+                //-------------------------------------------------------------
+                // FINALIZE MULTI-COMMAND FRAME - Commit all accumulated commands
+                //-------------------------------------------------------------
+                STATE_SEND_FINALIZE: begin
+                    $display("[CONTROLLER][STATE_SEND_FINALIZE] Committing multi-command frame");
+                    com_commit <= 1'b1;
+                    cmd_pos <= 8'd0;
+                    main_state <= STATE_WAIT_RX;
                 end
 
                 RX_PARSE_INPUT_CMD: begin
@@ -2005,22 +2409,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 //-------------------------------------------------------------
-                // READ INPUTS COMMAND - Request current input states
-                //-------------------------------------------------------------
-                STATE_SEND_INPUTS: begin
-                    // Send input commands using new jvs_com interface
-                    if (com_tx_ready) begin
-                        // Set destination node
-                        com_dst_node <= current_device_addr; // 01
-                        
-                        // Begin progressive state machine - start with switch inputs
-                        main_state <= STATE_SEND_INPUTS_SWITCH;
-                    end
-                end
-
-                // TX states removed - jvs_com module now handles all transmission
-
-                //-------------------------------------------------------------
                 // WAIT FOR DEVICE RESPONSE - Using edge detection for proper timing
                 //-------------------------------------------------------------
                 STATE_WAIT_RX: begin
@@ -2093,319 +2481,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             default: main_state <= STATE_FATAL_ERROR;               // Continue with polling
                         endcase
                     end
-                end
-
-                //-------------------------------------------------------------
-                // INPUT BUILDING PROGRESSIVE STATES
-                //-------------------------------------------------------------
-                
-                STATE_SEND_INPUTS_SWITCH: begin
-                    if (jvs_nodes.node_players[current_device_addr - 1] > 0) begin
-                        // Send SWINP command using sequential byte transmission
-                        if (com_tx_ready) begin
-                            // Initialize command parameters on first entry
-                            if (cmd_pos == 0) begin
-                                com_dst_node <= current_device_addr;
-                                return_state <= STATE_SEND_INPUTS_SWITCH;
-                            end
-
-                            // Select byte and signal based on position
-                            case (cmd_pos)
-                                3'd0: begin
-                                    com_tx_data <= CMD_SWINP;         // SWINP command (0x20)
-                                    com_tx_cmd_push <= 1'b1;         // Push as command
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                3'd1: begin
-                                    com_tx_data <= jvs_nodes.node_players[current_device_addr - 1];  // Number of players
-                                    com_tx_data_push <= 1'b1;        // Push as data
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                3'd2: begin
-                                    com_tx_data <= (jvs_nodes.node_buttons[current_device_addr - 1] + 7) / 8; // Bytes for buttons
-                                    com_tx_data_push <= 1'b1;        // Push as data
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                default: begin
-                                    // All bytes sent, commit and transition
-                                    //com_commit <= 1'b1;
-                                    cmd_pos <= 8'd0;
-                                    main_state <= STATE_SEND_INPUTS_COIN;
-                                end
-                            endcase
-                        end
-                    end else begin
-                        main_state <= STATE_SEND_INPUTS_COIN;
-                    end
-                end
-                
-                STATE_SEND_INPUTS_COIN: begin
-                    if (jvs_nodes.node_coin_slots[current_device_addr - 1] > 0) begin
-                        // Send COININP command using sequential byte transmission
-                        if (com_tx_ready) begin
-                            // Initialize command parameters on first entry
-                            if (cmd_pos == 0) begin
-                                com_dst_node <= current_device_addr;
-                                return_state <= STATE_SEND_INPUTS_COIN;
-                            end
-
-                            // Select byte and signal based on position
-                            case (cmd_pos)
-                                3'd0: begin
-                                    com_tx_data <= CMD_COININP;       // COININP command (0x21)
-                                    com_tx_cmd_push <= 1'b1;         // Push as command
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                3'd1: begin
-                                    com_tx_data <= jvs_nodes.node_coin_slots[current_device_addr - 1]; // Number of coin slots
-                                    com_tx_data_push <= 1'b1;        // Push as data
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                default: begin
-                                    // All bytes sent, commit and transition
-                                    //com_commit <= 1'b1;
-                                    cmd_pos <= 8'd0;
-                                    main_state <= STATE_SEND_INPUTS_ANALOG;
-                                end
-                            endcase
-                        end
-                    end else begin
-                        main_state <= STATE_SEND_INPUTS_ANALOG;
-                    end
-                end
-                
-                STATE_SEND_INPUTS_ANALOG: begin
-                    if (jvs_nodes.node_analog_channels[current_device_addr - 1] > 0) begin
-                        // Send ANLINP command using sequential byte transmission
-                        if (com_tx_ready) begin
-                            // Initialize command parameters on first entry
-                            if (cmd_pos == 0) begin
-                                com_dst_node <= current_device_addr;
-                                return_state <= STATE_SEND_INPUTS_ANALOG;
-                            end
-
-                            // Select byte and signal based on position
-                            case (cmd_pos)
-                                3'd0: begin
-                                    com_tx_data <= CMD_ANLINP;        // ANLINP command (0x22)
-                                    com_tx_cmd_push <= 1'b1;         // Push as command
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                3'd1: begin
-                                    com_tx_data <= jvs_nodes.node_analog_channels[current_device_addr - 1]; // Number of analog channels
-                                    com_tx_data_push <= 1'b1;        // Push as data
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                default: begin
-                                    // All bytes sent, commit and transition
-                                    //com_commit <= 1'b1;
-                                    cmd_pos <= 8'd0;
-                                    main_state <= STATE_SEND_INPUTS_ROTARY;
-                                end
-                            endcase
-                        end
-                    end else begin
-                        main_state <= STATE_SEND_INPUTS_ROTARY;
-                    end
-                end
-                
-                STATE_SEND_INPUTS_ROTARY: begin
-                    if (jvs_nodes.node_rotary_channels[current_device_addr - 1] > 0) begin
-                        // Send ROTINP command using sequential byte transmission
-                        if (com_tx_ready) begin
-                            // Initialize command parameters on first entry
-                            if (cmd_pos == 0) begin
-                                com_dst_node <= current_device_addr;
-                                return_state <= STATE_SEND_INPUTS_ROTARY;
-                            end
-
-                            // Select byte and signal based on position
-                            case (cmd_pos)
-                                3'd0: begin
-                                    com_tx_data <= CMD_ROTINP;        // ROTINP command (0x23)
-                                    com_tx_cmd_push <= 1'b1;         // Push as command
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                3'd1: begin
-                                    com_tx_data <= jvs_nodes.node_rotary_channels[current_device_addr - 1]; // Number of rotary channels
-                                    com_tx_data_push <= 1'b1;        // Push as data
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                default: begin
-                                    // All bytes sent, commit and transition
-                                    //com_commit <= 1'b1;
-                                    cmd_pos <= 8'd0;
-                                    main_state <= STATE_SEND_INPUTS_KEYCODE;
-                                end
-                            endcase
-                        end
-                    end else begin
-                        main_state <= STATE_SEND_INPUTS_KEYCODE;
-                    end
-                end
-                
-                STATE_SEND_INPUTS_KEYCODE: begin
-                    if (jvs_nodes.node_has_keycode_input[current_device_addr - 1]) begin
-                        // Send KEYINP command using sequential byte transmission (no parameters)
-                        if (com_tx_ready) begin
-                            // Initialize command parameters on first entry
-                            if (cmd_pos == 0) begin
-                                com_dst_node <= current_device_addr;
-                                return_state <= STATE_SEND_INPUTS_KEYCODE;
-                            end
-
-                            // Select byte and signal based on position
-                            case (cmd_pos)
-                                3'd0: begin
-                                    com_tx_data <= CMD_KEYINP;        // KEYINP command (0x24)
-                                    com_tx_cmd_push <= 1'b1;         // Push as command
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                default: begin
-                                    // All bytes sent, commit and transition
-                                    //com_commit <= 1'b1;
-                                    cmd_pos <= 8'd0;
-                                    main_state <= STATE_SEND_INPUTS_SCREEN;
-                                end
-                            endcase
-                        end
-                    end else begin
-                        main_state <= STATE_SEND_INPUTS_SCREEN;
-                    end
-                end
-                
-                STATE_SEND_INPUTS_SCREEN: begin
-                    if (jvs_nodes.node_has_screen_pos[current_device_addr - 1]) begin
-                        // Send SCRPOSINP command using sequential byte transmission
-                        if (com_tx_ready) begin
-                            // Initialize command parameters on first entry
-                            if (cmd_pos == 0) begin
-                                com_dst_node <= current_device_addr;
-                                return_state <= STATE_SEND_INPUTS_SCREEN;
-                            end
-
-                            // Select byte and signal based on position
-                            case (cmd_pos)
-                                3'd0: begin
-                                    com_tx_data <= CMD_SCRPOSINP;     // SCRPOSINP command (0x25)
-                                    com_tx_cmd_push <= 1'b1;         // Push as command
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                3'd1: begin
-                                    com_tx_data <= 8'h01;            // Channel index
-                                    com_tx_data_push <= 1'b1;        // Push as data
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                default: begin
-                                    // All bytes sent, commit and transition
-                                    //com_commit <= 1'b1;
-                                    cmd_pos <= 8'd0;
-                                    main_state <= STATE_SEND_INPUTS_MISC;
-                                end
-                            endcase
-                        end
-                    end else begin
-                        main_state <= STATE_SEND_INPUTS_MISC;
-                    end
-                end
-                
-                STATE_SEND_INPUTS_MISC: begin
-                    if (jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] > 0) begin
-                        // Send MISCSWINP command using sequential byte transmission
-                        if (com_tx_ready) begin
-                            // Initialize command parameters on first entry
-                            if (cmd_pos == 0) begin
-                                com_dst_node <= current_device_addr;
-                                return_state <= STATE_SEND_INPUTS_MISC;
-                            end
-
-                            // Select byte and signal based on position
-                            case (cmd_pos)
-                                3'd0: begin
-                                    com_tx_data <= CMD_MISCSWINP;     // MISCSWINP command (0x26)
-                                    com_tx_cmd_push <= 1'b1;         // Push as command
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                3'd1: begin
-                                    com_tx_data <= (jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] + 7) / 8; // Bytes needed
-                                    com_tx_data_push <= 1'b1;        // Push as data
-                                    main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                end
-                                default: begin
-                                    // All bytes sent, commit and transition
-                                    //com_commit <= 1'b1;
-                                    cmd_pos <= 8'd0;
-                                    main_state <= STATE_SEND_OUTPUT_DIGITAL;
-                                end
-                            endcase
-                        end
-                    end else begin
-                        main_state <= STATE_SEND_OUTPUT_DIGITAL;
-                    end
-                end
-                
-                STATE_SEND_OUTPUT_DIGITAL: begin
-                    // Check if device has digital outputs
-                    if (jvs_nodes.node_digital_outputs[current_device_addr - 1] > 0) begin
-                        if (jvs_nodes.node_players[current_device_addr - 1] == 1) begin
-                            // Send OUTPUT1 command using sequential byte transmission
-                            if (com_tx_ready) begin
-                                // Initialize command parameters on first entry
-                                if (cmd_pos == 0) begin
-                                    com_dst_node <= current_device_addr;
-                                    return_state <= STATE_SEND_OUTPUT_DIGITAL;
-                                end
-
-                                // Select byte and signal based on position
-                                case (cmd_pos)
-                                    3'd0: begin
-                                        com_tx_data <= CMD_OUTPUT1;       // OUTPUT1 command (0x32)
-                                        com_tx_cmd_push <= 1'b1;         // Push as command
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    3'd1: begin
-                                        com_tx_data <= 8'h03;            // send 3 bytes
-                                        com_tx_data_push <= 1'b1;        // Push as data
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    3'd2: begin
-                                        com_tx_data <= gpio_output_value; // Set GPIO1 to current value from SNAC
-                                        com_tx_data_push <= 1'b1;        // Push as data
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    3'd3: begin
-                                        com_tx_data <= 8'hA0;            // do not know what A is for, but taken from TC4 capture
-                                        com_tx_data_push <= 1'b1;        // Push as data
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    3'd4: begin
-                                        com_tx_data <= 8'h00;
-                                        com_tx_data_push <= 1'b1;        // Push as data
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    default: begin
-                                        // All bytes sent, transition to finalize
-                                        cmd_pos <= 8'd0;
-                                        main_state <= STATE_SEND_FINALIZE;
-                                    end
-                                endcase
-                            end
-                        end else begin
-                            main_state <= STATE_SEND_FINALIZE;
-                        end
-                    end else begin
-                        main_state <= STATE_SEND_FINALIZE;
-                    end
-                end
-
-                //-------------------------------------------------------------
-                // FINALIZE MULTI-COMMAND FRAME - Commit all accumulated commands
-                //-------------------------------------------------------------
-                STATE_SEND_FINALIZE: begin
-                    $display("[CONTROLLER][STATE_SEND_FINALIZE] Committing multi-command frame");
-                    com_commit <= 1'b1;
-                    cmd_pos <= 8'd0;
-                    main_state <= STATE_WAIT_RX;
                 end
 
                 //-------------------------------------------------------------
