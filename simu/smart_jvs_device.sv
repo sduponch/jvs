@@ -443,6 +443,51 @@ module smart_jvs_device #(
         $display("[SMART_JVS] Préparation réponse Feature Check (%d bytes)", response_length);
     endfunction
 
+    // Input polling response (0x20) - Réponse aux commandes multicommandes SWINP/COININP/ANLINP
+    function automatic void prepare_input_response();
+        // Réponse basée sur: E0001E01010000000000010000000001CE00BB00FA00FF00FF00AF00F200FA003E
+        integer idx = 0;
+        logic [7:0] checksum = 0;
+                                                                        
+        rx_buffer[idx++] = 8'hE0;       // SYNC                         E0
+        rx_buffer[idx++] = 8'h00;       // SOURCE (master)              00
+        rx_buffer[idx++] = 8'h1E;       // LENGTH (30 bytes)            1E
+        rx_buffer[idx++] = 8'h01;       // STATUS (Report = 1)          01
+
+        rx_buffer[idx++] = 8'h01;       // SWINP data start             01
+        rx_buffer[idx++] = 8'h00;       //                              00
+        rx_buffer[idx++] = 8'h00;       //                              00
+        rx_buffer[idx++] = 8'h00;       //                              00
+        rx_buffer[idx++] = 8'h00;       //                              00
+        rx_buffer[idx++] = 8'h00;       //                              00
+        rx_buffer[idx++] = 8'h01;       // COININP data start           01
+        rx_buffer[idx++] = 8'h00;       //                              00
+        rx_buffer[idx++] = 8'h00;       //                              00
+        rx_buffer[idx++] = 8'h00;       //                              00
+        rx_buffer[idx++] = 8'h00;       //                              00
+        rx_buffer[idx++] = 8'h01;       //                              01
+        rx_buffer[idx++] = 8'hCC;       // ANLINP data start            CC
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = 8'hBA;
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = 8'hFC;
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = 8'hFF;
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = 8'hFF;
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = 8'hAB;
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = 8'hF3;
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = 8'hF9;
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = 8'h39;
+
+        response_length = idx;
+        $display("[SMART_JVS] Préparation réponse Input polling (%d bytes)", response_length);
+    endfunction
+
     // Command revision response (0x11)
     function automatic void prepare_cmdrev_response();
         integer idx = 0;
@@ -570,10 +615,9 @@ module smart_jvs_device #(
                         need_response = 1;
                     end
 
-                    8'h20: begin // CMD_READ - Read inputs
-                        $display("[SMART_JVS] -> Lecture des entrées");
-                        // Pour les tests, on peut répondre avec des données factices
-                        prepare_ack_response();
+                    8'h20: begin // CMD_SWINP - Switch inputs (multicommande)
+                        $display("[SMART_JVS] -> Lecture des entrées multicommandes (SWINP/COININP/ANLINP)");
+                        prepare_input_response();
                         need_response = 1;
                     end
 
