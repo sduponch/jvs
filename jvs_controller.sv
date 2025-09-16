@@ -119,6 +119,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     output logic [15:0] screen_pos_x,   // Screen X position (16-bit from JVS)
     output logic [15:0] screen_pos_y,   // Screen Y position (16-bit from JVS)
     output logic has_screen_pos,        // Device supports screen position inputs
+
+    // Coin counter outputs (up to 4 coin slots)
+    output logic [15:0] coin_count[4],  // Coin counters for each slot (16-bit values)
     
     // GPIO control from SNAC
     input logic [7:0] gpio_output_value, // GPIO output value from SNAC (0x80=active, 0x00=inactive)
@@ -204,6 +207,8 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     logic       buffer_commit;          // Pulse to start sending buffer
     logic       buffer_ready;           // Buffer ready to accept new data
    
+    logic [3:0] current_player;
+
     //=========================================================================
     // JVS COMMUNICATION MODULE INSTANCE
     //=========================================================================
@@ -262,7 +267,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     localparam logic [31:0] SECOND_RESET_DELAY_COUNT = MASTER_CLK_FREQ / 2; // 0.5 seconds
     localparam logic [15:0] TX_SETUP_DELAY_COUNT = MASTER_CLK_FREQ / 100_000; // ~10µs
     localparam logic [15:0] TX_HOLD_DELAY_COUNT = MASTER_CLK_FREQ / 33_333; // ~30µs
-    localparam logic [31:0] RX_TIMEOUT_COUNT = MASTER_CLK_FREQ; // 1s (augmenté pour le parsing des features)
+    localparam logic [31:0] RX_TIMEOUT_COUNT = MASTER_CLK_FREQ * 2; // 1s (augmenté pour le parsing des features)
     localparam logic [31:0] POLL_INTERVAL_COUNT = MASTER_CLK_FREQ / 1_000; // 1ms
 
 
@@ -529,17 +534,18 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     
     // Additional RX states for input parsing (converted to 6-bit)
     localparam RX_PARSE_INPUTS_START = 6'h30;   // Initialize input response parsing
-    localparam RX_PARSE_INPUTS_SWITCH = 6'h31;  // Parse switch inputs data
-    localparam RX_PARSE_INPUTS_PLAYER = 6'h32;   // Parse individual player SWINP data (recursive)
-    localparam RX_PARSE_INPUTS_COIN = 6'h33;    // Parse coin inputs data
-    localparam RX_PARSE_INPUTS_ANALOG = 6'h34;  // Parse analog inputs data
-    localparam RX_PARSE_INPUTS_ANALOG_DATA = 6'h35; // Parse analog inputs channel ANLINP data (recursive)
-    localparam RX_PARSE_INPUTS_ROTARY = 6'h36;  // Parse rotary inputs data
-    localparam RX_PARSE_INPUTS_KEYCODE = 6'h37;  // Parse keycode inputs data
-    localparam RX_PARSE_INPUTS_SCREEN_POS = 6'h38; // Parse screen position inputs data
-    localparam RX_PARSE_INPUTS_MISC_DIGITAL = 6'h39; // Parse misc digital inputs data
-    localparam RX_PARSE_OUTPUT_DIGITAL = 6'h3A;  // Parse output digital response
-    localparam RX_PARSE_INPUTS_COMPLETE = 6'h3B; // Complete parsing and return to idle
+    localparam RX_PARSE_INPUT_CMD = 6'h31;      // Dispatch to appropriate parser based on command
+    localparam RX_PARSE_SWINP = 6'h32;          // Parse switch inputs data
+    localparam RX_PARSE_SWINP_PLAYER = 6'h33;   // Parse individual player SWINP data (recursive)
+    localparam RX_PARSE_COININP = 6'h34;        // Parse coin inputs data
+    localparam RX_PARSE_ANLINP = 6'h35;         // Parse analog inputs data
+    localparam RX_PARSE_ANLINP_DATA = 6'h36;    // Parse analog inputs channel ANLINP data (recursive)
+    localparam RX_PARSE_ROTINP = 6'h37;         // Parse rotary inputs data
+    localparam RX_PARSE_KEYINP = 6'h38;         // Parse keycode inputs data
+    localparam RX_PARSE_SCRPOSINP = 6'h39;      // Parse screen position inputs data
+    localparam RX_PARSE_MISCSWINP = 6'h3A;      // Parse misc digital inputs data
+    localparam RX_PARSE_OUTPUT1 = 6'h3B;        // Parse output digital response
+    localparam RX_PARSE_INPUTS_COMPLETE = 6'h3C; // Complete parsing and return to idle
     // Legacy feature parsing states (may be unused now, moved to avoid conflicts)
     localparam RX_PARSE_FUNC_DIGITAL = 6'h23;      // Parse digital input function parameters
     localparam RX_PARSE_FUNC_COIN = 6'h24;         // Parse coin input function parameters
@@ -1275,6 +1281,721 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 //-------------------------------------------------------------
+                // INPUT PARSING STATES - Parse input response data
+                //-------------------------------------------------------------
+                RX_PARSE_INPUTS_START: begin
+                    $display("[CONTROLLER][RX_PARSE_INPUTS_START] Starting input parsing, cmd_pos=%d, rx_byte=0x%02X", cmd_pos, com_rx_byte);
+                    if(com_src_cmd_status == STATUS_NORMAL) begin
+                        main_state <= RX_PARSE_INPUT_CMD;
+                    end else begin
+                        main_state <= STATE_FATAL_ERROR;
+                    end
+                end
+
+                RX_PARSE_INPUT_CMD: begin
+                    $display("[CONTROLLER][RX_PARSE_INPUT_CMD] Parsing command 0x%02X, cmd_pos=%d, rx_byte=0x%02X, cmd_count=%d", com_src_cmd, cmd_pos, com_rx_byte, com_src_cmd_count);
+                    // Check if there are commands in the FIFO
+                    if (com_src_cmd_count > 0 && com_rx_remaining > 0) begin
+                        // Parse based on current command in FIFO
+                        case (com_src_cmd)
+                            CMD_SWINP: begin
+                                case(cmd_pos)
+                                    3'd0: begin
+                                        if (com_rx_byte == REPORT_NORMAL) begin
+                                            $display("[CONTROLLER][RX_PARSE_INPUT_CMD][SWINP] Report Normal");
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end else begin
+                                            $display("[CONTROLLER][RX_PARSE_INPUT_CMD][SWINP] ERROR: Bad REPORT 0x%02X for SWINP", com_rx_byte);
+                                            com_src_cmd_next <= 1'b1;
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            cmd_pos <= 0;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end
+                                    end
+                                    3'd1: begin
+                                        $display("[CONTROLLER][RX_PARSE_INPUT_CMD][SWINP] Consume System byte %02X for SWINP", com_rx_byte);
+                                        current_player <= 4'd0; // initialise player idx
+                                        return_state <= RX_PARSE_SWINP;
+                                        cmd_pos <= 0;
+                                        main_state <= STATE_RX_NEXT;
+                                        com_rx_next <= 1'b1;
+                                    end
+                                endcase
+                            end
+                            CMD_COININP: begin
+                                case(cmd_pos)
+                                    3'd0: begin
+                                        // Check REPORT byte
+                                        if (com_rx_byte == REPORT_NORMAL) begin
+                                            $display("[CONTROLLER][COININP] Report Normal");
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end else begin
+                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for COININP", com_rx_byte);
+                                            com_src_cmd_next <= 1'b1;
+                                            cmd_pos <= 0;
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end
+                                    end
+                                    3'd1: begin
+                                        // Dispatch to specialized COININP state
+                                        $display("[CONTROLLER] Dispatching to COININP specialized parser");
+                                        cmd_pos <= 0;
+                                        return_state <= RX_PARSE_COININP;
+                                        main_state <= RX_PARSE_COININP;
+                                    end
+                                endcase
+                            end
+                            CMD_ANLINP: begin
+                                case(cmd_pos)
+                                    3'd0: begin
+                                        // Check REPORT byte
+                                        if (com_rx_byte == REPORT_NORMAL) begin
+                                            $display("[CONTROLLER][ANLINP] Report Normal");
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end else begin
+                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for ANLINP", com_rx_byte);
+                                            com_src_cmd_next <= 1'b1;
+                                            cmd_pos <= 0;
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end
+                                    end
+                                    3'd1: begin
+                                        // Dispatch to specialized ANLINP state
+                                        $display("[CONTROLLER] Dispatching to ANLINP specialized parser");
+                                        cmd_pos <= 0;
+                                        return_state <= RX_PARSE_ANLINP;
+                                        main_state <= RX_PARSE_ANLINP;
+                                    end
+                                endcase
+                            end
+                            CMD_ROTINP: begin
+                                case(cmd_pos)
+                                    3'd0: begin
+                                        // Check REPORT byte
+                                        if (com_rx_byte == REPORT_NORMAL) begin
+                                            $display("[CONTROLLER][ROTINP] Report Normal");
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end else begin
+                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for ROTINP", com_rx_byte);
+                                            com_src_cmd_next <= 1'b1;
+                                            cmd_pos <= 0;
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end
+                                    end
+                                    default: begin
+                                        // Simple parsing - skip rotary data (not implemented)
+                                        $display("[CONTROLLER] Skipping ROTINP byte: 0x%02X", com_rx_byte);
+                                        // Check if more data or advance to next command
+                                        if (com_rx_remaining <= 1) begin
+                                            // Last byte, advance to next command
+                                            $display("[CONTROLLER] ROTINP parsing complete");
+                                            cmd_pos <= 0;
+                                            com_src_cmd_next <= 1'b1;
+                                        end
+                                        return_state <= RX_PARSE_INPUT_CMD;
+                                        main_state <= STATE_RX_NEXT;
+                                        com_rx_next <= 1'b1;
+                                    end
+                                endcase
+                            end
+                            CMD_KEYINP: begin
+                                case(cmd_pos)
+                                    3'd0: begin
+                                        // Check REPORT byte
+                                        if (com_rx_byte == REPORT_NORMAL) begin
+                                            $display("[CONTROLLER][KEYINP] Report Normal");
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end else begin
+                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for KEYINP", com_rx_byte);
+                                            com_src_cmd_next <= 1'b1;
+                                            cmd_pos <= 0;
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end
+                                    end
+                                    default: begin
+                                        // Simple parsing - skip keycode data (not implemented)
+                                        $display("[CONTROLLER] Skipping KEYINP byte: 0x%02X", com_rx_byte);
+                                        // Check if more data or advance to next command
+                                        if (com_rx_remaining <= 1) begin
+                                            // Last byte, advance to next command
+                                            $display("[CONTROLLER] KEYINP parsing complete");
+                                            cmd_pos <= 0;
+                                            com_src_cmd_next <= 1'b1;
+                                        end
+                                        return_state <= RX_PARSE_INPUT_CMD;
+                                        main_state <= STATE_RX_NEXT;
+                                        com_rx_next <= 1'b1;
+                                    end
+                                endcase
+                            end
+                            CMD_SCRPOSINP: begin
+                                case(cmd_pos)
+                                    3'd0: begin
+                                        // Check REPORT byte
+                                        if (com_rx_byte == REPORT_NORMAL) begin
+                                            $display("[CONTROLLER][SCRPOSINP] Report Normal");
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end else begin
+                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for SCRPOSINP", com_rx_byte);
+                                            com_src_cmd_next <= 1'b1;
+                                            cmd_pos <= 0;
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end
+                                    end
+                                    3'd1: begin
+                                        // Dispatch to specialized SCRPOSINP state for screen position parsing
+                                        $display("[CONTROLLER] Dispatching to SCRPOSINP specialized parser");
+                                        cmd_pos <= 0;
+                                        return_state <= RX_PARSE_SCRPOSINP;
+                                        main_state <= RX_PARSE_SCRPOSINP;
+                                    end
+                                endcase
+                            end
+                            CMD_MISCSWINP: begin
+                                case(cmd_pos)
+                                    3'd0: begin
+                                        // Check REPORT byte
+                                        if (com_rx_byte == REPORT_NORMAL) begin
+                                            $display("[CONTROLLER][MISCSWINP] Report Normal");
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end else begin
+                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for MISCSWINP", com_rx_byte);
+                                            com_src_cmd_next <= 1'b1;
+                                            cmd_pos <= 0;
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end
+                                    end
+                                    default: begin
+                                        // Simple parsing - skip misc digital data (not implemented)
+                                        $display("[CONTROLLER] Skipping MISCSWINP byte: 0x%02X", com_rx_byte);
+                                        // Check if more data or advance to next command
+                                        if (com_rx_remaining <= 1) begin
+                                            // Last byte, advance to next command
+                                            $display("[CONTROLLER] MISCSWINP parsing complete");
+                                            cmd_pos <= 0;
+                                            com_src_cmd_next <= 1'b1;
+                                        end
+                                        return_state <= RX_PARSE_INPUT_CMD;
+                                        main_state <= STATE_RX_NEXT;
+                                        com_rx_next <= 1'b1;
+                                    end
+                                endcase
+                            end
+                            CMD_OUTPUT1: begin
+                                case(cmd_pos)
+                                    3'd0: begin
+                                        // Check REPORT byte
+                                        if (com_rx_byte == REPORT_NORMAL) begin
+                                            $display("[CONTROLLER][OUTPUT1] Report Normal");
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end else begin
+                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for OUTPUT1", com_rx_byte);
+                                            com_src_cmd_next <= 1'b1;
+                                            cmd_pos <= 0;
+                                            return_state <= RX_PARSE_INPUT_CMD;
+                                            main_state <= STATE_RX_NEXT;
+                                            com_rx_next <= 1'b1;
+                                        end
+                                    end
+                                    default: begin
+                                        // Simple parsing - OUTPUT1 response is just acknowledgment, no complex data
+                                        $display("[CONTROLLER] OUTPUT1 acknowledgment byte: 0x%02X", com_rx_byte);
+                                        // Check if more data or advance to next command
+                                        if (com_rx_remaining <= 1) begin
+                                            // Last byte, advance to next command
+                                            $display("[CONTROLLER] OUTPUT1 parsing complete");
+                                            cmd_pos <= 0;
+                                            com_src_cmd_next <= 1'b1;
+                                        end
+                                        return_state <= RX_PARSE_INPUT_CMD;
+                                        main_state <= STATE_RX_NEXT;
+                                        com_rx_next <= 1'b1;
+                                    end
+                                endcase
+                            end
+                            default: begin
+                                $display("[CONTROLLER] Unknown command 0x%02X, advancing to next", com_src_cmd);
+                                com_src_cmd_next <= 1'b1;
+                                cmd_pos <= 0;
+                                return_state <= RX_PARSE_INPUT_CMD;
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                        endcase
+                    end else begin
+                        // No more commands, input parsing complete
+                        $display("[CONTROLLER] All input commands processed, returning to polling");
+                        main_state <= STATE_IDLE;
+                    end
+                end
+                
+                RX_PARSE_SWINP: begin
+                    $display("[CONTROLLER][RX_PARSE_SWINP] Player=%d, cmd_pos=%d, rx_byte=0x%02X", current_player, cmd_pos, com_rx_byte);
+                    return_state <= RX_PARSE_SWINP;
+                    case (current_player)
+                        4'd0: begin // Player 1
+                            if (cmd_pos == 1) begin
+                                $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P1 byte 1");
+                                // First player data byte
+                                p1_btn_state[15] <= com_rx_byte[7];  // START
+                                p1_btn_state[14] <= com_rx_byte[6];  // SELECT/SERVICE
+                                p1_btn_state[0]  <= com_rx_byte[5];  // UP
+                                p1_btn_state[1]  <= com_rx_byte[4];  // DOWN
+                                p1_btn_state[2]  <= com_rx_byte[3];  // LEFT
+                                p1_btn_state[3]  <= com_rx_byte[2];  // RIGHT
+                                p1_btn_state[4]  <= com_rx_byte[1];  // A (push1)
+                                p1_btn_state[5]  <= com_rx_byte[0];  // B (push2)
+
+                                if (jvs_nodes.node_buttons[current_device_addr - 1] <= 8) begin
+                                    // Only 1 byte per player, clear unused bits and advance to next player
+                                    p1_btn_state[13:6] <= 8'b00000000;
+                                    current_player <= current_player + 1;
+                                    cmd_pos <= 0;
+                                end
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end else if (cmd_pos == 2 && jvs_nodes.node_buttons[current_device_addr - 1] > 8) begin
+                                $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P1 byte 2");
+                                // Second player data byte (additional buttons)
+                                p1_btn_state[6] <= com_rx_byte[7];   // X (push3)
+                                p1_btn_state[7] <= com_rx_byte[6];   // Y (push4)
+                                p1_btn_state[8] <= com_rx_byte[5];   // push5 -> L1
+                                p1_btn_state[9] <= com_rx_byte[4];   // push6 -> R1
+                                p1_btn_state[10] <= com_rx_byte[3];  // push7 -> L2
+                                p1_btn_state[11] <= com_rx_byte[2];  // push8 -> R2
+                                p1_btn_state[12] <= com_rx_byte[1];  // push9 -> L3
+                                p1_btn_state[13] <= com_rx_byte[0];  // push10 -> R3
+                                // Advance to next player
+                                current_player <= current_player + 1;
+                                cmd_pos <= 0; // Reset for next player
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                        end
+
+                        4'd1: begin // Player 2
+                            if (cmd_pos == 1) begin
+                                $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P2 byte 1");
+                                // First player data byte
+                                p2_btn_state[15] <= com_rx_byte[7];  // START
+                                p2_btn_state[14] <= com_rx_byte[6];  // SELECT/SERVICE
+                                p2_btn_state[0]  <= com_rx_byte[5];  // UP
+                                p2_btn_state[1]  <= com_rx_byte[4];  // DOWN
+                                p2_btn_state[2]  <= com_rx_byte[3];  // LEFT
+                                p2_btn_state[3]  <= com_rx_byte[2];  // RIGHT
+                                p2_btn_state[4]  <= com_rx_byte[1];  // A (push1)
+                                p2_btn_state[5]  <= com_rx_byte[0];  // B (push2)
+
+                                if (jvs_nodes.node_buttons[current_device_addr - 1] <= 8) begin
+                                    // Only 1 byte per player, clear unused bits and advance to next player
+                                    p2_btn_state[13:6] <= 8'b00000000;
+                                    current_player <= current_player + 1;
+                                    cmd_pos <= 0;
+                                end
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end else if (cmd_pos == 2 && jvs_nodes.node_buttons[current_device_addr - 1] > 8) begin
+                                $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P2 byte 2");
+                                // Second player data byte (additional buttons) - match your reference bit mapping
+                                p2_btn_state[6] <= com_rx_byte[7];   // X (push3)
+                                p2_btn_state[7] <= com_rx_byte[6];   // Y (push4)
+                                p2_btn_state[8] <= com_rx_byte[5];   // push5 -> L1
+                                p2_btn_state[9] <= com_rx_byte[4];   // push6 -> R1
+                                p2_btn_state[10] <= com_rx_byte[3];  // push7 -> L2
+                                p2_btn_state[11] <= com_rx_byte[2];  // push8 -> R2
+                                // Clear unused upper bits for consistency with reference
+                                p2_btn_state[13:12] <= 2'b00;
+                                // Advance to next player
+                                current_player <= current_player + 1;
+                                cmd_pos <= 0; // Reset for next player
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                        end
+
+                        default: begin
+                            if (current_player >= jvs_nodes.node_players[current_device_addr - 1]) begin
+                                $display("[CONTROLLER][RX_PARSE_SWINP] All players processed, advancing to next command");
+                                cmd_pos <= 0;
+                                com_src_cmd_next <= 1'b1;
+                                return_state <= RX_PARSE_INPUT_CMD;
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end else begin
+                                // Additional players (if supported)
+                                $display("[CONTROLLER][RX_PARSE_SWINP] Skipping unsupported player %d", current_player);
+                                if (cmd_pos == 1) begin
+                                    $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P%d byte 1", current_player);
+                                    if (jvs_nodes.node_buttons[current_device_addr - 1] <= 8) begin
+                                        // Only 1 byte per player, clear unused bits and advance to next player
+                                        current_player <= current_player + 1;
+                                        cmd_pos <= 0;
+                                    end
+                                    main_state <= STATE_FATAL_ERROR;
+                                    com_rx_next <= 1'b1;
+                                end
+                                if (cmd_pos == 2 && jvs_nodes.node_buttons[current_device_addr - 1] > 8) begin
+                                    $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P%d byte 2", current_player);
+                                    // Advance to next player
+                                    current_player <= current_player + 1;
+                                    cmd_pos <= 0; // Reset for next player
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end
+                            end
+                        end
+                    endcase
+                end
+
+                RX_PARSE_COININP: begin
+                    $display("[CONTROLLER][RX_PARSE_COININP] Parsing coin data, cmd_pos=%d, rx_byte=0x%02X", cmd_pos, com_rx_byte);
+                    return_state <= RX_PARSE_COININP;
+                    if (com_rx_remaining > 0) begin
+                        // Parse coin input data based on node configuration
+                        // REPORT byte already consumed by RX_PARSE_INPUT_CMD, start parsing from cmd_pos=1
+                        automatic logic [7:0] data_pos = cmd_pos - 1; // Adjust for REPORT byte
+                        automatic logic [3:0] slot_idx = data_pos / 2;
+                        automatic logic is_high_byte = (data_pos % 2) == 0;
+
+                        if (data_pos < (jvs_nodes.node_coin_slots[current_device_addr - 1] * 2)) begin // 2 bytes per coin slot
+                            if (is_high_byte) begin
+                                // High byte of coin counter
+                                case (slot_idx)
+                                    0: coin_count[0][15:8] <= com_rx_byte;
+                                    1: coin_count[1][15:8] <= com_rx_byte;
+                                    2: coin_count[2][15:8] <= com_rx_byte;
+                                    3: coin_count[3][15:8] <= com_rx_byte;
+                                endcase
+                                $display("[CONTROLLER] Coin slot %d high byte: 0x%02X", slot_idx, com_rx_byte);
+                            end else begin
+                                // Low byte of coin counter
+                                case (slot_idx)
+                                    0: coin_count[0][7:0] <= com_rx_byte;
+                                    1: coin_count[1][7:0] <= com_rx_byte;
+                                    2: coin_count[2][7:0] <= com_rx_byte;
+                                    3: coin_count[3][7:0] <= com_rx_byte;
+                                endcase
+                                $display("[CONTROLLER] Coin slot %d low byte: 0x%02X, count = %d", slot_idx, com_rx_byte,
+                                        (slot_idx == 0) ? {coin_count[0][15:8], com_rx_byte} :
+                                        (slot_idx == 1) ? {coin_count[1][15:8], com_rx_byte} :
+                                        (slot_idx == 2) ? {coin_count[2][15:8], com_rx_byte} :
+                                                         {coin_count[3][15:8], com_rx_byte});
+                            end
+                            main_state <= STATE_RX_NEXT;
+                            com_rx_next <= 1'b1;
+                        end else begin
+                            // Coin parsing complete, advance to next command
+                            $display("[CONTROLLER] Coin parsing complete, advancing to next command");
+                            cmd_pos <= 0;
+                            com_src_cmd_next <= 1'b1; // Advance to next command in FIFO
+                            return_state <= RX_PARSE_INPUT_CMD;
+                            main_state <= STATE_RX_NEXT;
+                            com_rx_next <= 1'b1;
+                        end
+                    end else begin
+                        // No more data, return to command dispatcher
+                        cmd_pos <= 0;
+                        com_src_cmd_next <= 1'b1;
+                        return_state <= RX_PARSE_INPUT_CMD;
+                        main_state <= STATE_RX_NEXT;
+                        com_rx_next <= 1'b1;
+                    end
+                end
+
+                RX_PARSE_ANLINP: begin
+                    $display("[CONTROLLER][RX_PARSE_ANLINP] Parsing analog data, cmd_pos=%d, rx_byte=0x%02X", cmd_pos, com_rx_byte);
+                    return_state <= RX_PARSE_ANLINP;
+                    if (com_rx_remaining > 0) begin
+                        case (cmd_pos)
+                            3'd0: begin
+                                // Check REPORT byte
+                                if (com_rx_byte == REPORT_NORMAL) begin
+                                    $display("[CONTROLLER][RX_PARSE_ANLINP] Report Normal");
+                                    com_rx_next <= 1'b1;
+                                    main_state <= STATE_RX_NEXT;
+                                end else begin
+                                    $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for ANLINP", com_rx_byte);
+                                    com_src_cmd_next <= 1'b1;
+                                    return_state <= RX_PARSE_INPUT_CMD;
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end
+                            end
+                            default: begin
+                                // Parse analog input data based on node configuration
+                                automatic logic [7:0] data_pos = cmd_pos - 1; // Adjust for REPORT byte
+                                if (data_pos < (jvs_nodes.node_analog_channels[current_device_addr - 1] * 2)) begin // 2 bytes per channel
+                                    automatic logic [3:0] channel_idx = data_pos / 2;
+                                    if (data_pos % 2 == 0) begin
+                                // High byte
+                                case (channel_idx)
+                                    0: p1_joy_state[31:24] <= com_rx_byte;  // P1 X axis high
+                                    1: p1_joy_state[15:8] <= com_rx_byte;   // P1 Y axis high
+                                    2: p2_joy_state[31:24] <= com_rx_byte;  // P2 X axis high
+                                    3: p2_joy_state[15:8] <= com_rx_byte;   // P2 Y axis high
+                                    default: begin
+                                        // Store in screen position for channels > 3
+                                        if (channel_idx == 4) screen_pos_x[15:8] <= com_rx_byte;
+                                        else if (channel_idx == 5) screen_pos_y[15:8] <= com_rx_byte;
+                                    end
+                                endcase
+                                $display("[CONTROLLER] Analog channel %d high byte: 0x%02X", channel_idx, com_rx_byte);
+                            end else begin
+                                // Low byte
+                                case (channel_idx)
+                                    0: p1_joy_state[23:16] <= com_rx_byte;  // P1 X axis low
+                                    1: p1_joy_state[7:0] <= com_rx_byte;    // P1 Y axis low
+                                    2: p2_joy_state[23:16] <= com_rx_byte;  // P2 X axis low
+                                    3: p2_joy_state[7:0] <= com_rx_byte;    // P2 Y axis low
+                                    default: begin
+                                        // Store in screen position for channels > 3
+                                        if (channel_idx == 4) screen_pos_x[7:0] <= com_rx_byte;
+                                        else if (channel_idx == 5) screen_pos_y[7:0] <= com_rx_byte;
+                                    end
+                                endcase
+                                $display("[CONTROLLER] Analog channel %d low byte: 0x%02X", channel_idx, com_rx_byte);
+                            end
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end else begin
+                                    // Analog parsing complete, check if more commands or return to polling
+                                    $display("[CONTROLLER] Analog parsing complete, checking for more commands");
+                                    cmd_pos <= 0;
+                                    com_src_cmd_next <= 1'b1; // Advance to next command in FIFO
+                                    return_state <= RX_PARSE_INPUT_CMD;
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end
+                            end
+                        endcase
+                    end else begin
+                        main_state <= STATE_IDLE;
+                    end
+                end
+
+                //-------------------------------------------------------------
+                // ADDITIONAL INPUT PARSING STATES - Not yet implemented
+                //-------------------------------------------------------------
+                RX_PARSE_ROTINP: begin
+                    $display("[CONTROLLER][RX_PARSE_ROTINP] Parsing rotary data - pas encore implémenté");
+                    return_state <= RX_PARSE_ROTINP;
+                    if (com_rx_remaining > 0) begin
+                        case (cmd_pos)
+                            3'd0: begin
+                                // Check REPORT byte
+                                if (com_rx_byte == REPORT_NORMAL) begin
+                                    $display("[CONTROLLER][RX_PARSE_ROTINP] Report Normal");
+                                    com_rx_next <= 1'b1;
+                                    main_state <= STATE_RX_NEXT;
+                                end else begin
+                                    $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for ROTINP", com_rx_byte);
+                                    com_src_cmd_next <= 1'b1;
+                                    return_state <= RX_PARSE_INPUT_CMD;
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end
+                            end
+                            default: begin
+                                // Parse rotary data - not yet implemented
+                                $display("[CONTROLLER] Skipping rotary byte: 0x%02X", com_rx_byte);
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                        endcase
+                    end else begin
+                        com_src_cmd_next <= 1'b1;
+                        return_state <= RX_PARSE_INPUT_CMD;
+                        main_state <= STATE_RX_NEXT;
+                        com_rx_next <= 1'b1;
+                    end
+                end
+
+                RX_PARSE_KEYINP: begin
+                    $display("[CONTROLLER][RX_PARSE_KEYINP] Parsing keycode data - pas encore implémenté");
+                    return_state <= RX_PARSE_KEYINP;
+                    if (com_rx_remaining > 0) begin
+                        case (cmd_pos)
+                            3'd0: begin
+                                // Check REPORT byte
+                                if (com_rx_byte == REPORT_NORMAL) begin
+                                    $display("[CONTROLLER][RX_PARSE_KEYINP] Report Normal");
+                                    com_rx_next <= 1'b1;
+                                    main_state <= STATE_RX_NEXT;
+                                end else begin
+                                    $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for KEYINP", com_rx_byte);
+                                    com_src_cmd_next <= 1'b1;
+                                    return_state <= RX_PARSE_INPUT_CMD;
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end
+                            end
+                            default: begin
+                                // Parse keycode data - not yet implemented
+                                $display("[CONTROLLER] Skipping keycode byte: 0x%02X", com_rx_byte);
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                        endcase
+                    end else begin
+                        com_src_cmd_next <= 1'b1;
+                        return_state <= RX_PARSE_INPUT_CMD;
+                        main_state <= STATE_RX_NEXT;
+                        com_rx_next <= 1'b1;
+                    end
+                end
+
+                RX_PARSE_SCRPOSINP: begin
+                    $display("[CONTROLLER][RX_PARSE_SCRPOSINP] Parsing screen position data, cmd_pos=%d, rx_byte=0x%02X", cmd_pos, com_rx_byte);
+                    return_state <= RX_PARSE_SCRPOSINP;
+                    if (com_rx_remaining > 0) begin
+                        // Parse screen position data (4 bytes: X_HIGH, X_LOW, Y_HIGH, Y_LOW)
+                        // REPORT byte already consumed by RX_PARSE_INPUT_CMD, start parsing from cmd_pos=1
+                        automatic logic [7:0] data_pos = cmd_pos - 1; // Adjust for REPORT byte
+                        case (data_pos)
+                            8'd0: begin // X coordinate high byte
+                                screen_pos_x[15:8] <= com_rx_byte;
+                                $display("[CONTROLLER] Screen X high byte: 0x%02X", com_rx_byte);
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                            8'd1: begin // X coordinate low byte
+                                screen_pos_x[7:0] <= com_rx_byte;
+                                $display("[CONTROLLER] Screen X low byte: 0x%02X, X = %d", com_rx_byte, {screen_pos_x[15:8], com_rx_byte});
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                            8'd2: begin // Y coordinate high byte
+                                screen_pos_y[15:8] <= com_rx_byte;
+                                $display("[CONTROLLER] Screen Y high byte: 0x%02X", com_rx_byte);
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                            8'd3: begin // Y coordinate low byte
+                                screen_pos_y[7:0] <= com_rx_byte;
+                                $display("[CONTROLLER] Screen Y low byte: 0x%02X, Y = %d", com_rx_byte, {screen_pos_y[15:8], com_rx_byte});
+                                $display("[CONTROLLER] Screen position complete: (%d, %d)", {screen_pos_x[15:8], screen_pos_x[7:0]}, {screen_pos_y[15:8], com_rx_byte});
+                                // Screen position parsing complete, advance to next command
+                                cmd_pos <= 0;
+                                com_src_cmd_next <= 1'b1;
+                                return_state <= RX_PARSE_INPUT_CMD;
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                            default: begin
+                                // Unexpected data, skip
+                                $display("[CONTROLLER] Unexpected SCRPOSINP data at pos %d: 0x%02X", data_pos, com_rx_byte);
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                        endcase
+                    end else begin
+                        // No more data, return to command dispatcher
+                        cmd_pos <= 0;
+                        com_src_cmd_next <= 1'b1;
+                        return_state <= RX_PARSE_INPUT_CMD;
+                        main_state <= STATE_RX_NEXT;
+                        com_rx_next <= 1'b1;
+                    end
+                end
+
+                RX_PARSE_MISCSWINP: begin
+                    $display("[CONTROLLER][RX_PARSE_MISCSWINP] Parsing misc digital data - pas encore implémenté");
+                    return_state <= RX_PARSE_MISCSWINP;
+                    if (com_rx_remaining > 0) begin
+                        case (cmd_pos)
+                            3'd0: begin
+                                // Check REPORT byte
+                                if (com_rx_byte == REPORT_NORMAL) begin
+                                    $display("[CONTROLLER][RX_PARSE_MISCSWINP] Report Normal");
+                                    com_rx_next <= 1'b1;
+                                    main_state <= STATE_RX_NEXT;
+                                end else begin
+                                    $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for MISCSWINP", com_rx_byte);
+                                    com_src_cmd_next <= 1'b1;
+                                    return_state <= RX_PARSE_INPUT_CMD;
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end
+                            end
+                            default: begin
+                                // Parse misc digital data - not yet implemented
+                                $display("[CONTROLLER] Skipping misc digital byte: 0x%02X", com_rx_byte);
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                        endcase
+                    end else begin
+                        com_src_cmd_next <= 1'b1;
+                        return_state <= RX_PARSE_INPUT_CMD;
+                        main_state <= STATE_RX_NEXT;
+                        com_rx_next <= 1'b1;
+                    end
+                end
+
+                RX_PARSE_OUTPUT1: begin
+                    $display("[CONTROLLER][RX_PARSE_OUTPUT1] Parsing output digital response - pas encore implémenté");
+                    return_state <= RX_PARSE_OUTPUT1;
+                    if (com_rx_remaining > 0) begin
+                        case (cmd_pos)
+                            3'd0: begin
+                                // Check REPORT byte
+                                if (com_rx_byte == REPORT_NORMAL) begin
+                                    $display("[CONTROLLER][RX_PARSE_OUTPUT1] Report Normal");
+                                    com_rx_next <= 1'b1;
+                                    main_state <= STATE_RX_NEXT;
+                                end else begin
+                                    $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for OUTPUT1", com_rx_byte);
+                                    com_src_cmd_next <= 1'b1;
+                                    return_state <= RX_PARSE_INPUT_CMD;
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end
+                            end
+                            default: begin
+                                // Parse output digital response - not yet implemented
+                                $display("[CONTROLLER] Skipping output digital byte: 0x%02X", com_rx_byte);
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                        endcase
+                    end else begin
+                        com_src_cmd_next <= 1'b1;
+                        return_state <= RX_PARSE_INPUT_CMD;
+                        main_state <= STATE_RX_NEXT;
+                        com_rx_next <= 1'b1;
+                    end
+                end
+
+                //-------------------------------------------------------------
                 // READ INPUTS COMMAND - Request current input states
                 //-------------------------------------------------------------
                 STATE_SEND_INPUTS: begin
@@ -1326,9 +2047,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 end
                                 CMD_SWINP: begin
                                     cmd_pos <= 8'd0;                           // Initialize parsing position
-                                    // TODO: Implement input parsing states
-                                    $display("[CONTROLLER] CMD_SWINP response received - parsing not implemented yet");
-                                    main_state <= STATE_IDLE;                  // Return to polling for now
+                                    main_state <= RX_PARSE_INPUTS_START;       // Start parsing input responses
                                 end
                                 default: begin
                                     main_state <= STATE_IDLE;
@@ -1782,6 +2501,12 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             p2_joy_state <= 32'h80808080;
             p3_btn_state <= 16'h0000;
             p4_btn_state <= 16'h0000;
+
+            // Initialize coin counters
+            coin_count[0] <= 16'h0000;
+            coin_count[1] <= 16'h0000;
+            coin_count[2] <= 16'h0000;
+            coin_count[3] <= 16'h0000;
             
         end else begin
             // RX frame processing managed by jvs_com module
