@@ -18,13 +18,25 @@ jobs:
   #       ref: jvs_submodule
   #       path: JVS_Debugger
   #       submodules: 'recursive'
-  #   - name: Update JVS submodule to main
+  #   - name: Update JVS submodule to PR branch
   #     run: |
   #       cd JVS_Debugger/src/fpga/analogizer/jvs
   #       git fetch origin
-  #       git checkout origin/main
+  #       # Use the branch from the PR context, fallback to main for direct pushes
+  #       if [ "${{ github.event_name }}" = "pull_request" ]; then
+  #         BRANCH_REF="${{ github.head_ref }}"
+  #         echo "🔄 PR detected - using branch: $BRANCH_REF"
+  #         git checkout origin/$BRANCH_REF || {
+  #           echo "⚠️ Branch $BRANCH_REF not found, falling back to main"
+  #           git checkout origin/main
+  #         }
+  #       else
+  #         BRANCH_REF="${{ github.ref_name }}"
+  #         echo "📤 Push detected - using branch: $BRANCH_REF"
+  #         git checkout origin/$BRANCH_REF
+  #       fi
   #       cd ../../../..
-  #       echo "✅ JVS submodule updated to main branch"
+  #       echo "✅ JVS submodule updated to branch: $BRANCH_REF"
   #   - name: Install Quartus dependencies (includes ModelSim)
   #     run: |
   #       sudo apt-get update
@@ -94,13 +106,25 @@ jobs:
         path: JVS_Debugger
         submodules: 'recursive'
 
-    - name: Update JVS submodule to main
+    - name: Update JVS submodule to PR branch
       run: |
         cd JVS_Debugger/src/fpga/analogizer/jvs
         git fetch origin
-        git checkout origin/main
+        # Use the branch from the PR context, fallback to main for direct pushes
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          BRANCH_REF="${{ github.head_ref }}"
+          echo "🔄 PR detected - using branch: $BRANCH_REF"
+          git checkout origin/$BRANCH_REF || {
+            echo "⚠️ Branch $BRANCH_REF not found, falling back to main"
+            git checkout origin/main
+          }
+        else
+          BRANCH_REF="${{ github.ref_name }}"
+          echo "📤 Push detected - using branch: $BRANCH_REF"
+          git checkout origin/$BRANCH_REF
+        fi
         cd ../../../..
-        echo "✅ JVS submodule updated to main branch"
+        echo "✅ JVS submodule updated to branch: $BRANCH_REF"
 
     - name: Install dependencies
       run: |
@@ -268,7 +292,13 @@ jobs:
         export BUILD_NUMBER="${{ github.run_number }}"
         export COMMIT_SHA="${{ github.sha }}"
         export BUILD_DATE="$(date -u)"
-        export BRANCH_NAME="${{ github.ref_name }}"
+        # Use head_ref for PRs, ref_name for direct pushes
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          export BRANCH_NAME="${{ github.head_ref }}"
+          export PR_NUMBER="${{ github.event.number }}"
+        else
+          export BRANCH_NAME="${{ github.ref_name }}"
+        fi
         python3 ${SCRIPTS_DIR}/generate_html_stats.py
 
         # Create markdown version for compatibility
@@ -277,7 +307,11 @@ jobs:
         echo "**Build:** ${{ github.run_number }}" >> package/BUILD_INFO.md
         echo "**Commit:** ${{ github.sha }}" >> package/BUILD_INFO.md
         echo "**Date:** $(date -u)" >> package/BUILD_INFO.md
-        echo "**Branch:** ${{ github.ref_name }}" >> package/BUILD_INFO.md
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          echo "**Branch:** ${{ github.head_ref }} (PR #${{ github.event.number }})" >> package/BUILD_INFO.md
+        else
+          echo "**Branch:** ${{ github.ref_name }}" >> package/BUILD_INFO.md
+        fi
         echo "" >> package/BUILD_INFO.md
 
         if [ -f "src/fpga/fpga_stats.txt" ]; then
