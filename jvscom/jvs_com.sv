@@ -218,7 +218,7 @@ module jvs_com
 
     reg rs485_tx_enable;
     reg rx_to_tx_pending;  // Flag to indicate transition from RX to TX needed
-    assign o_rs485_dir = ~rs485_tx_enable;
+    assign o_rs485_dir = rs485_tx_enable;
 
     
     //////////////////////////////////////////////////////////////////////
