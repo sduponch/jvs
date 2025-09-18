@@ -249,6 +249,13 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     localparam logic [15:0] TX_HOLD_DELAY_COUNT = MASTER_CLK_FREQ / 33_333; // ~30µs
     localparam logic [31:0] RX_TIMEOUT_COUNT = MASTER_CLK_FREQ * 2; // 1s (augmenté pour le parsing des features)
     localparam logic [31:0] POLL_INTERVAL_COUNT = MASTER_CLK_FREQ / 1_000; // 1ms
+    localparam logic [31:0] SETADDR_TO_IOIDENT_DELAY = MASTER_CLK_FREQ / 500; // 2ms delay after SETADDR
+    localparam logic [31:0] IOIDENT_TO_CMDREV_DELAY = MASTER_CLK_FREQ / 1000; // 1ms delay after IOIDENT
+    localparam logic [31:0] CMDREV_TO_JVSREV_DELAY = MASTER_CLK_FREQ / 1000; // 1ms delay after CMDREV
+    localparam logic [31:0] JVSREV_TO_COMMVER_DELAY = MASTER_CLK_FREQ / 1000; // 1ms delay after JVSREV
+    localparam logic [31:0] COMMVER_TO_FEATURES_DELAY = MASTER_CLK_FREQ / 1000; // 1ms delay after COMMVER
+    localparam logic [31:0] FEATURES_TO_IDLE_DELAY = MASTER_CLK_FREQ / 500; // 2ms delay after FEATURES
+    localparam logic [31:0] POLLING_INTERVAL_DELAY = MASTER_CLK_FREQ / 1000; // 1ms delay between polling cycles
 
 
     //=========================================================================
@@ -487,6 +494,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     
     // GENERIC FLOW CONTROL STATES
     localparam STATE_WAIT_RX = 6'h01;          // Wait for device response with 1s timeout
+    localparam STATE_MAIN_TIMER_DELAY = 6'h3D; // Generic timer delay state - returns to return_state when done
     
     // INPUT POLLING SEQUENCE STATES (chained command construction)
     localparam STATE_SEND_INPUTS = 6'h12;         // Start input polling sequence
@@ -498,7 +506,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     localparam STATE_SEND_INPUTS_SCREEN = 6'h18;  // Add screen position (25) if available (light gun)
     localparam STATE_SEND_INPUTS_MISC = 6'h19;    // Add misc inputs (26) if available
     localparam STATE_SEND_OUTPUT_DIGITAL = 6'h1A; // Send digital output command (32) for GPIO
-    localparam STATE_SEND_OUTPUT_ANALOG = 6'h3C; // Send digital output command (32) for GPIO
+    localparam STATE_SEND_OUTPUT_ANALOG = 6'h3E; // Send analog output command (33) for GPIO
     localparam STATE_SEND_FINALIZE = 6'h1B;       // Finalize chained command frame and transmit
     
     // RESET ARGUMENT STATES (for double reset sequence)
@@ -695,6 +703,34 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             coin_count[2] <= 16'h0000;
             coin_count[3] <= 16'h0000;
 
+            // Initialize JVS node information (single node only)
+            jvs_nodes_r.node_id[0] <= 8'h01;
+            jvs_nodes_r.node_cmd_ver[0] <= 8'h00;
+            jvs_nodes_r.node_jvs_ver[0] <= 8'h00;
+            jvs_nodes_r.node_com_ver[0] <= 8'h00;
+            jvs_nodes_r.node_players[0] <= 4'h0;
+            jvs_nodes_r.node_buttons[0] <= 8'h0;
+            jvs_nodes_r.node_analog_channels[0] <= 4'h0;
+            jvs_nodes_r.node_rotary_channels[0] <= 4'h0;
+            // Additional input capabilities (not yet supported)
+            jvs_nodes_r.node_has_keycode_input[0] <= 1'b0;
+            jvs_nodes_r.node_has_screen_pos[0] <= 1'b0;
+            jvs_nodes_r.node_screen_pos_x_bits[0] <= 8'h0;
+            jvs_nodes_r.node_screen_pos_y_bits[0] <= 8'h0;
+            // Initialize has_screen_pos output
+            has_screen_pos <= 1'b0;
+            jvs_nodes_r.node_misc_digital_inputs[0] <= 16'h0;
+            // Output capabilities
+            jvs_nodes_r.node_digital_outputs[0] <= 8'h0;
+            jvs_nodes_r.node_analog_output_channels[0] <= 4'h0;
+            jvs_nodes_r.node_card_system_slots[0] <= 8'h0;
+            jvs_nodes_r.node_medal_hopper_channels[0] <= 8'h0;
+            jvs_nodes_r.node_has_char_display[0] <= 1'b0;
+            jvs_nodes_r.node_char_display_width[0] <= 8'h0;
+            jvs_nodes_r.node_char_display_height[0] <= 8'h0;
+            jvs_nodes_r.node_char_display_type[0] <= 8'h0;
+            jvs_nodes_r.node_has_backup[0] <= 1'b0;
+
             // Initialize edge detection register
             com_rx_complete_d <= 1'b0;
         end else begin
@@ -876,7 +912,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                         end
                         default: begin
                             cmd_pos <= 8'd0;          // Reset position for next command
-                            main_state <= STATE_SEND_IOIDENT;
+                            // Add delay before sending IOIDENT command
+                            delay_counter <= SETADDR_TO_IOIDENT_DELAY;
+                            return_state <= STATE_SEND_IOIDENT;
+                            main_state <= STATE_MAIN_TIMER_DELAY;
+                            $display("[CONTROLLER] SETADDR complete, adding %0d cycle delay before IOIDENT", SETADDR_TO_IOIDENT_DELAY);
                         end
                     endcase
                 end
@@ -941,7 +981,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     $display("");
                                     */
                                     cmd_pos <= 8'd0;  // Reset position for next command
-                                    main_state <= STATE_SEND_CMDREV; // Proceed to command revision
+                                    // Add delay before sending CMDREV command
+                                    delay_counter <= IOIDENT_TO_CMDREV_DELAY;
+                                    return_state <= STATE_SEND_CMDREV;
+                                    main_state <= STATE_MAIN_TIMER_DELAY;
+                                    $display("[CONTROLLER] IOIDENT complete, adding %0d cycle delay before CMDREV", IOIDENT_TO_CMDREV_DELAY);
                                 end else if (copy_write_idx < jvs_node_info_pkg::NODE_NAME_SIZE - 1) begin
                                     // Copy character to node name buffer
                                     jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= com_rx_byte;
@@ -953,13 +997,17 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     $display("[CONTROLLER][RX_PARSE_IOIDENT] Name buffer full, skipping chars");
                                     com_rx_next <= 1'b1;     // Advance to first name character
                                     cmd_pos <= 8'd0;  // Reset position for next command
-                                    main_state <= STATE_SEND_CMDREV;
+                                    delay_counter <= IOIDENT_TO_CMDREV_DELAY;
+                                    return_state <= STATE_SEND_CMDREV;
+                                    main_state <= STATE_MAIN_TIMER_DELAY;
                                 end
                             end else begin
                                 // End of data reached without null terminator
                                 $display("[CONTROLLER][RX_PARSE_IOIDENT] End of data reached, name copy complete");
                                 cmd_pos <= 8'd0;
-                                main_state <= STATE_SEND_CMDREV; // Proceed to command revision
+                                delay_counter <= IOIDENT_TO_CMDREV_DELAY;
+                                return_state <= STATE_SEND_CMDREV;
+                                main_state <= STATE_MAIN_TIMER_DELAY;
                             end
                         end
                     endcase
@@ -1021,11 +1069,16 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             jvs_nodes_r.node_cmd_ver[current_device_addr - 1] <= com_rx_byte;
                             $display("[CONTROLLER][RX_PARSE_CMDREV] Command revision stored: 0x%02X", com_rx_byte);
                             cmd_pos <= 8'd0;          // Reset position for next command
-                            main_state <= STATE_SEND_JVSREV;
+                            delay_counter <= CMDREV_TO_JVSREV_DELAY;
+                            return_state <= STATE_SEND_JVSREV;
+                            main_state <= STATE_MAIN_TIMER_DELAY;
+                            $display("[CONTROLLER] CMDREV complete, adding %0d cycle delay before JVSREV", CMDREV_TO_JVSREV_DELAY);
                         end
                         default: begin
                             cmd_pos <= 8'd0;          // Reset position for next command
-                            main_state <= STATE_SEND_JVSREV;
+                            delay_counter <= CMDREV_TO_JVSREV_DELAY;
+                            return_state <= STATE_SEND_JVSREV;
+                            main_state <= STATE_MAIN_TIMER_DELAY;
                         end
                     endcase
                 end
@@ -1079,11 +1132,16 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             jvs_nodes_r.node_jvs_ver[current_device_addr - 1] <= com_rx_byte;
                             $display("[CONTROLLER][RX_PARSE_JVSREV] JVS revision stored: 0x%02X", com_rx_byte);
                             cmd_pos <= 8'd0;          // Reset position for next command
-                            main_state <= STATE_SEND_COMMVER;
+                            delay_counter <= JVSREV_TO_COMMVER_DELAY;
+                            return_state <= STATE_SEND_COMMVER;
+                            main_state <= STATE_MAIN_TIMER_DELAY;
+                            $display("[CONTROLLER] JVSREV complete, adding %0d cycle delay before COMMVER", JVSREV_TO_COMMVER_DELAY);
                         end
                         default: begin
                             cmd_pos <= 8'd0;          // Reset position for next command
-                            main_state <= STATE_SEND_COMMVER;
+                            delay_counter <= JVSREV_TO_COMMVER_DELAY;
+                            return_state <= STATE_SEND_COMMVER;
+                            main_state <= STATE_MAIN_TIMER_DELAY;
                         end
                     endcase
                 end
@@ -1138,11 +1196,16 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             jvs_nodes_r.node_com_ver[current_device_addr - 1] <= com_rx_byte;
                             $display("[CONTROLLER][RX_PARSE_COMMVER] Communications version stored: 0x%02X", com_rx_byte);
                             cmd_pos <= 8'd0;          // Reset position for next command
-                            main_state <= STATE_SEND_FEATCHK;
+                            delay_counter <= COMMVER_TO_FEATURES_DELAY;
+                            return_state <= STATE_SEND_FEATCHK;
+                            main_state <= STATE_MAIN_TIMER_DELAY;
+                            $display("[CONTROLLER] COMMVER complete, adding %0d cycle delay before FEATCHK", COMMVER_TO_FEATURES_DELAY);
                         end
                         default: begin
                             cmd_pos <= 8'd0;          // Reset position for next command
-                            main_state <= STATE_SEND_FEATCHK;
+                            delay_counter <= COMMVER_TO_FEATURES_DELAY;
+                            return_state <= STATE_SEND_FEATCHK;
+                            main_state <= STATE_MAIN_TIMER_DELAY;
                         end
                     endcase
                 end
@@ -1208,8 +1271,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     $display("[CONTROLLER] *** JVS INITIALIZATION COMPLETE - ACTIVATING jvs_data_ready_init ***");
                                     jvs_data_ready_init <= 1'b1;
                                     cmd_pos <= 8'd0;
-                                    return_state <= STATE_IDLE;
-                                    main_state <= STATE_SEND_INPUTS;
+                                    // Add delay before going to input polling
+                                    delay_counter <= FEATURES_TO_IDLE_DELAY;
+                                    return_state <= STATE_SEND_INPUTS;
+                                    main_state <= STATE_MAIN_TIMER_DELAY;
+                                    $display("[CONTROLLER] FEATURES complete, adding %0d cycle delay before polling", FEATURES_TO_IDLE_DELAY);
                                 end else begin
                                     // Store function code and continue
                                     current_func_code <= com_rx_byte;
@@ -1359,7 +1425,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // INPUT BUILDING PROGRESSIVE STATES
                 //-------------------------------------------------------------
                 STATE_SEND_INPUTS_SWITCH: begin
-                    if (jvs_nodes.node_players[current_device_addr - 1] > 0) begin
+                    if (jvs_nodes_r.node_players[current_device_addr - 1] > 0) begin
                         // Send SWINP command using sequential byte transmission
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1376,12 +1442,12 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
                                 3'd1: begin
-                                    com_tx_data <= jvs_nodes.node_players[current_device_addr - 1];  // Number of players
+                                    com_tx_data <= jvs_nodes_r.node_players[current_device_addr - 1];  // Number of players
                                     com_tx_data_push <= 1'b1;        // Push as data
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
                                 3'd2: begin
-                                    com_tx_data <= (jvs_nodes.node_buttons[current_device_addr - 1] + 7) / 8; // Bytes for buttons
+                                    com_tx_data <= (jvs_nodes_r.node_buttons[current_device_addr - 1] + 7) / 8; // Bytes for buttons
                                     com_tx_data_push <= 1'b1;        // Push as data
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
@@ -1398,7 +1464,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end
                 end
                 STATE_SEND_INPUTS_COIN: begin // (CMD_COININP) @TODO: (CMD_COINDEC),(COININC)
-                    if (jvs_nodes.node_coin_slots[current_device_addr - 1] > 0) begin
+                    if (jvs_nodes_r.node_coin_slots[current_device_addr - 1] > 0) begin
                         // Send COININP command using sequential byte transmission
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1415,7 +1481,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
                                 3'd1: begin
-                                    com_tx_data <= jvs_nodes.node_coin_slots[current_device_addr - 1]; // Number of coin slots
+                                    com_tx_data <= jvs_nodes_r.node_coin_slots[current_device_addr - 1]; // Number of coin slots
                                     com_tx_data_push <= 1'b1;        // Push as data
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
@@ -1432,7 +1498,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end
                 end
                 STATE_SEND_INPUTS_ANALOG: begin
-                    if (jvs_nodes.node_analog_channels[current_device_addr - 1] > 0) begin
+                    if (jvs_nodes_r.node_analog_channels[current_device_addr - 1] > 0) begin
                         // Send ANLINP command using sequential byte transmission
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1449,7 +1515,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
                                 3'd1: begin
-                                    com_tx_data <= jvs_nodes.node_analog_channels[current_device_addr - 1]; // Number of analog channels
+                                    com_tx_data <= jvs_nodes_r.node_analog_channels[current_device_addr - 1]; // Number of analog channels
                                     com_tx_data_push <= 1'b1;        // Push as data
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
@@ -1466,7 +1532,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end
                 end
                 STATE_SEND_INPUTS_ROTARY: begin
-                    if (jvs_nodes.node_rotary_channels[current_device_addr - 1] > 0) begin
+                    if (jvs_nodes_r.node_rotary_channels[current_device_addr - 1] > 0) begin
                         // Send ROTINP command using sequential byte transmission
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1483,7 +1549,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
                                 3'd1: begin
-                                    com_tx_data <= jvs_nodes.node_rotary_channels[current_device_addr - 1]; // Number of rotary channels
+                                    com_tx_data <= jvs_nodes_r.node_rotary_channels[current_device_addr - 1]; // Number of rotary channels
                                     com_tx_data_push <= 1'b1;        // Push as data
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
@@ -1500,7 +1566,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end
                 end
                 STATE_SEND_INPUTS_KEYCODE: begin
-                    if (jvs_nodes.node_has_keycode_input[current_device_addr - 1]) begin
+                    if (jvs_nodes_r.node_has_keycode_input[current_device_addr - 1]) begin
                         // Send KEYINP command using sequential byte transmission (no parameters)
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1529,7 +1595,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end
                 end
                 STATE_SEND_INPUTS_SCREEN: begin
-                    if (jvs_nodes.node_has_screen_pos[current_device_addr - 1]) begin
+                    if (jvs_nodes_r.node_has_screen_pos[current_device_addr - 1]) begin
                         // Send SCRPOSINP command using sequential byte transmission
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1563,7 +1629,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end
                 end
                 STATE_SEND_INPUTS_MISC: begin
-                    if (jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] > 0) begin
+                    if (jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1] > 0) begin
                         // Send MISCSWINP command using sequential byte transmission
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1580,7 +1646,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
                                 3'd1: begin
-                                    com_tx_data <= (jvs_nodes.node_misc_digital_inputs[current_device_addr - 1] + 7) / 8; // Bytes needed
+                                    com_tx_data <= (jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1] + 7) / 8; // Bytes needed
                                     com_tx_data_push <= 1'b1;        // Push as data
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
@@ -1600,8 +1666,8 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // @TODO: Medal Hopper not supported (CMD_PAYCNT),(PAYINC),
                 STATE_SEND_OUTPUT_DIGITAL: begin // (CMD_OUTPUT1) @TODO: (CMD_OUTPUT2),(CMD_OUTPUT3)
                     // Check if device has digital outputs
-                    if (jvs_nodes.node_digital_outputs[current_device_addr - 1] > 0) begin
-                        if (jvs_nodes.node_players[current_device_addr - 1] == 1) begin
+                    if (jvs_nodes_r.node_digital_outputs[current_device_addr - 1] > 0) begin
+                        if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
                             // Single player mode (Time Crisis style) - Send OUTPUT1 command using sequential byte transmission
                             if (com_tx_ready) begin
                                 // Initialize command parameters on first entry
@@ -1659,14 +1725,14 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // @TODO: Analog Output not supported (CMD_ANLOUT)
                 STATE_SEND_OUTPUT_ANALOG: begin // (CMD_ANLOUT)
                     // Check if device has analog outputs
-                    if (jvs_nodes.node_analog_output_channels[current_device_addr - 1] > 0) begin
+                    if (jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] > 0) begin
                         if(com_tx_ready) begin
                                // Initialize command parameters on first entry
                                 if (cmd_pos == 0) begin
                                     com_dst_node <= current_device_addr;
                                     return_state <= STATE_SEND_OUTPUT_ANALOG;
                                 end
-                                if(current_channel >= jvs_nodes.node_analog_output_channels[current_device_addr - 1]) begin
+                                if(current_channel >= jvs_nodes_r.node_analog_output_channels[current_device_addr - 1]) begin
                                     main_state <= STATE_SEND_FINALIZE;
                                     cmd_pos <= 0;
                                 end else begin
@@ -1678,7 +1744,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                         end
                                         3'd1: begin
-                                            com_tx_data <= jvs_nodes.node_analog_output_channels[current_device_addr - 1]; // Number of channels to send
+                                            com_tx_data <= jvs_nodes_r.node_analog_output_channels[current_device_addr - 1]; // Number of channels to send
                                             com_tx_data_push <= 1'b1;
                                             main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                         end
@@ -2167,9 +2233,13 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                         endcase
                     end else begin
                         // No more commands, input parsing complete
-                        $display("[CONTROLLER] All input commands processed, returning to polling");
+                        $display("[CONTROLLER] All input commands processed, adding delay before next polling cycle");
                         jvs_data_ready_joy <= 1'b1; // Signal that input data is ready for gaming
-                        main_state <= STATE_SEND_INPUTS;
+                        // Add delay between polling cycles to avoid overwhelming the bus
+                        delay_counter <= POLLING_INTERVAL_DELAY;
+                        return_state <= STATE_SEND_INPUTS;
+                        main_state <= STATE_MAIN_TIMER_DELAY;
+                        $display("[CONTROLLER] Polling cycle complete, adding %0d cycle delay before next cycle", POLLING_INTERVAL_DELAY);
                     end
                 end
                 
@@ -2190,7 +2260,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 p1_btn_state[4]  <= com_rx_byte[1];  // A (push1)
                                 p1_btn_state[5]  <= com_rx_byte[0];  // B (push2)
 
-                                if (jvs_nodes.node_buttons[current_device_addr - 1] <= 8) begin
+                                if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
                                     // Only 1 byte per player, clear unused bits and advance to next player
                                     p1_btn_state[13:6] <= 8'b00000000;
                                     current_player <= current_player + 1;
@@ -2198,7 +2268,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 end
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
-                            end else if (cmd_pos == 2 && jvs_nodes.node_buttons[current_device_addr - 1] > 8) begin
+                            end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
                                 $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P1 byte 2");
                                 // Second player data byte (additional buttons)
                                 p1_btn_state[6] <= com_rx_byte[7];   // X (push3)
@@ -2230,7 +2300,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 p2_btn_state[4]  <= com_rx_byte[1];  // A (push1)
                                 p2_btn_state[5]  <= com_rx_byte[0];  // B (push2)
 
-                                if (jvs_nodes.node_buttons[current_device_addr - 1] <= 8) begin
+                                if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
                                     // Only 1 byte per player, clear unused bits and advance to next player
                                     p2_btn_state[13:6] <= 8'b00000000;
                                     current_player <= current_player + 1;
@@ -2238,7 +2308,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 end
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
-                            end else if (cmd_pos == 2 && jvs_nodes.node_buttons[current_device_addr - 1] > 8) begin
+                            end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
                                 $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P2 byte 2");
                                 // Second player data byte (additional buttons) - match your reference bit mapping
                                 p2_btn_state[6] <= com_rx_byte[7];   // X (push3)
@@ -2258,7 +2328,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                         end
 
                         default: begin
-                            if (current_player >= jvs_nodes.node_players[current_device_addr - 1]) begin
+                            if (current_player >= jvs_nodes_r.node_players[current_device_addr - 1]) begin
                                 $display("[CONTROLLER][RX_PARSE_SWINP] All players processed, advancing to next command");
                                 cmd_pos <= 0;
                                 com_src_cmd_next <= 1'b1;
@@ -2270,7 +2340,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 $display("[CONTROLLER][RX_PARSE_SWINP] Skipping unsupported player %d", current_player);
                                 if (cmd_pos == 1) begin
                                     $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P%d byte 1", current_player);
-                                    if (jvs_nodes.node_buttons[current_device_addr - 1] <= 8) begin
+                                    if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
                                         // Only 1 byte per player, clear unused bits and advance to next player
                                         current_player <= current_player + 1;
                                         cmd_pos <= 0;
@@ -2278,7 +2348,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     main_state <= STATE_FATAL_ERROR;
                                     com_rx_next <= 1'b1;
                                 end
-                                if (cmd_pos == 2 && jvs_nodes.node_buttons[current_device_addr - 1] > 8) begin
+                                if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
                                     $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P%d byte 2", current_player);
                                     // Advance to next player
                                     current_player <= current_player + 1;
@@ -2321,7 +2391,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         current_coin, com_rx_byte, {temp_counter_msb, com_rx_byte}, (temp_coin_condition == 2'b10));
                                 
                                 // Check if we need to parse the next coin slot
-                                if (current_coin >= (jvs_nodes.node_coin_slots[current_device_addr - 1] - 1)) begin
+                                if (current_coin >= (jvs_nodes_r.node_coin_slots[current_device_addr - 1] - 1)) begin
                                     // Coin parsing complete, advance to next command
                                     $display("[CONTROLLER] Coin parsing complete, advancing to next command");
                                     cmd_pos <= 0;
@@ -2370,7 +2440,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             default: begin
                                 // Parse analog input data based on node configuration
                                 automatic logic [7:0] data_pos = cmd_pos - 1; // Adjust for REPORT byte
-                                if (data_pos < (jvs_nodes.node_analog_channels[current_device_addr - 1] * 2)) begin // 2 bytes per channel
+                                if (data_pos < (jvs_nodes_r.node_analog_channels[current_device_addr - 1] * 2)) begin // 2 bytes per channel
                                     automatic logic [3:0] channel_idx = data_pos / 2;
                                     if (data_pos % 2 == 0) begin
                                 // High byte
@@ -2661,6 +2731,19 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             */
                             default: main_state <= STATE_FATAL_ERROR;               // Continue with polling
                         endcase
+                    end
+                end
+
+                //-------------------------------------------------------------
+                // GENERIC TIMER DELAY STATE - Reusable delay for any state transition
+                //-------------------------------------------------------------
+                STATE_MAIN_TIMER_DELAY: begin
+                    if (delay_counter > 0) begin
+                        delay_counter <= delay_counter - 1;
+                    end else begin
+                        // Timer expired, return to caller state
+                        main_state <= return_state;
+                        $display("[CONTROLLER] MAIN_TIMER_DELAY complete, returning to state 0x%02X", return_state);
                     end
                 end
 
