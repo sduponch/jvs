@@ -217,20 +217,9 @@ module jvs_com
     //////////////////////////////////////////////////////////////////////
 
     reg rs485_tx_enable;
-    reg rs485_tx_enable_prev;  // For edge detection
     reg rx_to_tx_pending;  // Flag to indicate transition from RX to TX needed
-    assign o_rs485_dir = rs485_tx_enable;
+    assign o_rs485_dir = ~rs485_tx_enable;
 
-    // Log RS485 direction changes
-    always @(posedge clk_sys) begin
-        if (reset) begin
-            rs485_tx_enable_prev <= 1'b0;
-        end else begin
-            rs485_tx_enable_prev <= rs485_tx_enable;
-            if (rs485_tx_enable != rs485_tx_enable_prev) begin
-            end
-        end
-    end
     
     //////////////////////////////////////////////////////////////////////
     // Checksum Calculation Function
@@ -275,7 +264,6 @@ module jvs_com
             cmd_write_ptr <= 0;
             cmd_read_ptr <= 0;
             cmd_count <= 0;
-            src_cmd_status <= 8'h00;  // No STATUS received yet
         end else begin
             // Handle data and command push - all managed in TX state machine
             
@@ -389,12 +377,9 @@ module jvs_com
                         tx_dst_node_latched <= dst_node;
                         tx_commit_pending <= 1'b1;
                         tx_ready <= 1'b0;
-                    end
-                    if (tx_commit_pending) begin
-                        // Prepare frame from TX data buffer
-                        tx_frame_node <= tx_dst_node_latched;
+                        // Prepare frame from TX data buffer immediately
+                        tx_frame_node <= dst_node;
                         tx_frame_length <= tx_data_count + JVS_CHECKSUM_SIZE;
-
                         tx_timer <= 0;
                         tx_state <= TX_SETUP;
                     end
@@ -565,6 +550,7 @@ module jvs_com
             rx_state_debug <= RX_IDLE;
             cmd_fifo_init <= 1'b0;
             rx_to_tx_pending <= 1'b0;
+            src_cmd_status <= 8'h00;  // No STATUS received yet
         end else begin
             rx_state_debug <= rx_state;
             rx_complete <= rx_complete_pulse; // Connect to pulse register
@@ -581,8 +567,7 @@ module jvs_com
 
                 case (rx_state)
                     RX_IDLE: begin
-                        // Force RX mode when starting to receive data
-                        rs485_tx_enable <= 1'b0;
+                        // RX mode is managed by TX state machine
                         if (uart_rx_data == JVS_SYNC) begin
                             rx_checksum_calc <= 0;
                             rx_data_idx <= 0;
@@ -672,6 +657,7 @@ module jvs_com
             rx_remaining <= rx_remaining - 1;
             
             // Display complete frame with current position marker
+            /*
             $write("[%0t] RX_NEXT: Frame [", $time);
             for (int i = 0; i < rx_length_internal - 1; i++) begin
                 if (i == rx_read_idx + 1) begin
@@ -682,9 +668,9 @@ module jvs_com
                 if (i < rx_length_internal - 2) $write(" ");
             end
             $write("] remaining=%0d", rx_remaining - 1);
-            
             // Display command FIFO state
             $write(" | FIFO[%0d]: [", cmd_count);
+            */
             for (int i = 0; i < cmd_count; i++) begin
                 $write("0x%02X", cmd_fifo[(cmd_read_ptr + i) % 16]);
                 if (i < cmd_count - 1) $write(", ");
