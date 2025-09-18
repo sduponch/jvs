@@ -681,6 +681,20 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             com_rx_next <= 1'b0;
             com_src_cmd_next <= 1'b0;
 
+            // Initialize output button and joystick states
+            p1_btn_state <= 16'h0000;           // All buttons released
+            p1_joy_state <= 32'h80808080;       // Analog sticks centered (0x80 = center)
+            p2_btn_state <= 16'h0000;
+            p2_joy_state <= 32'h80808080;
+            p3_btn_state <= 16'h0000;
+            p4_btn_state <= 16'h0000;
+
+            // Initialize coin counters
+            coin_count[0] <= 16'h0000;
+            coin_count[1] <= 16'h0000;
+            coin_count[2] <= 16'h0000;
+            coin_count[3] <= 16'h0000;
+
             // Initialize edge detection register
             com_rx_complete_d <= 1'b0;
         end else begin
@@ -918,12 +932,14 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 if (com_rx_byte == 8'h00) begin
                                     // Found null terminator, store it and finish copying
                                     jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
+                                    /*
                                     $display("[CONTROLLER][RX_PARSE_IOIDENT] Name copy complete, %d chars %d", copy_write_idx, com_rx_remaining);
                                     $write("[CONTROLLER][RX_PARSE_IOIDENT] Device name: ");
                                     for (int i = 0; i < copy_write_idx; i++) begin
                                         $write("%c", jvs_nodes_r.node_name[current_device_addr - 1][i]);
                                     end
                                     $display("");
+                                    */
                                     cmd_pos <= 8'd0;  // Reset position for next command
                                     main_state <= STATE_SEND_CMDREV; // Proceed to command revision
                                 end else if (copy_write_idx < jvs_node_info_pkg::NODE_NAME_SIZE - 1) begin
@@ -1189,6 +1205,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 if (com_rx_byte == 8'h00) begin
                                     // Terminator found - feature parsing complete
                                     $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Feature parsing complete (terminator found)");
+                                    $display("[CONTROLLER] *** JVS INITIALIZATION COMPLETE - ACTIVATING jvs_data_ready_init ***");
                                     jvs_data_ready_init <= 1'b1;
                                     cmd_pos <= 8'd0;
                                     return_state <= STATE_IDLE;
@@ -1585,7 +1602,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     // Check if device has digital outputs
                     if (jvs_nodes.node_digital_outputs[current_device_addr - 1] > 0) begin
                         if (jvs_nodes.node_players[current_device_addr - 1] == 1) begin
-                            // Send OUTPUT1 command using sequential byte transmission
+                            // Single player mode (Time Crisis style) - Send OUTPUT1 command using sequential byte transmission
                             if (com_tx_ready) begin
                                 // Initialize command parameters on first entry
                                 if (cmd_pos == 0) begin
@@ -1624,53 +1641,60 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         // All bytes sent, transition to finalize
                                         cmd_pos <= 8'd0;
                                         main_state <= STATE_SEND_OUTPUT_ANALOG;
+                                        current_channel <= 8'd0;
                                     end
                                 endcase
                             end
                         end else begin
+                            cmd_pos <= 8'd0;
                             main_state <= STATE_SEND_OUTPUT_ANALOG;
+                            current_channel <= 8'd0;
                         end
                     end else begin
+                        cmd_pos <= 8'd0;
                         main_state <= STATE_SEND_OUTPUT_ANALOG;
+                        current_channel <= 8'd0;
                     end
                 end
                 // @TODO: Analog Output not supported (CMD_ANLOUT)
                 STATE_SEND_OUTPUT_ANALOG: begin // (CMD_ANLOUT)
-                    // Check if device has digital outputs
-                    if (jvs_nodes.node_digital_outputs[current_device_addr - 1] > 0) begin
+                    // Check if device has analog outputs
+                    if (jvs_nodes.node_analog_output_channels[current_device_addr - 1] > 0) begin
                         if(com_tx_ready) begin
                                // Initialize command parameters on first entry
                                 if (cmd_pos == 0) begin
                                     com_dst_node <= current_device_addr;
                                     return_state <= STATE_SEND_OUTPUT_ANALOG;
                                 end
-                                case (cmd_pos)
-                                    3'd0: begin
-                                        current_channel <= 0;
-                                        com_tx_data <= CMD_ANLOUT;       // OUTPUT1 command (0x33)
-                                        com_tx_cmd_push <= 1'b1;         // Push as command
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    3'd1: begin
-                                        com_tx_data <= 8'h01;       // Number of channel to send
-                                        com_tx_data_push <= 1'b1;
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    3'd2: begin
-                                        com_tx_data <= 8'h00;           // Channel N MSB (@TODO: send null value at the momment)
-                                        com_tx_data_push <=1'b1 ;       // Push data
-                                        main_state <= STATE_TX_NEXT;    // Go to TX_NEXT
-                                    end
-                                    3'd3: begin
-                                        com_tx_data <= 8'h00;            // Channel N LSB (@TODO: send null value at the momment)
-                                        com_tx_data_push <= 1'b1;       // Push data
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                        current_channel <= current_channel + 1;
-                                        cmd_pos <= 1; // Go back to "3'd2" after increased by TX_NEXT
-                                    end
-                                endcase
-                                if(current_channel > jvs_nodes.node_digital_outputs[current_device_addr - 1] - 1) begin
+                                if(current_channel >= jvs_nodes.node_analog_output_channels[current_device_addr - 1]) begin
                                     main_state <= STATE_SEND_FINALIZE;
+                                    cmd_pos <= 0;
+                                end else begin
+                                    case (cmd_pos)
+                                        3'd0: begin
+                                            current_channel <= 0;
+                                            com_tx_data <= CMD_ANLOUT;       // OUTPUT1 command (0x33)
+                                            com_tx_cmd_push <= 1'b1;         // Push as command
+                                            main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                        end
+                                        3'd1: begin
+                                            com_tx_data <= jvs_nodes.node_analog_output_channels[current_device_addr - 1]; // Number of channels to send
+                                            com_tx_data_push <= 1'b1;
+                                            main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                        end
+                                        3'd2: begin
+                                            com_tx_data <= 8'h00;           // Channel N MSB (@TODO: send null value at the momment)
+                                            com_tx_data_push <=1'b1 ;       // Push data
+                                            main_state <= STATE_TX_NEXT;    // Go to TX_NEXT
+                                        end
+                                        3'd3: begin
+                                            com_tx_data <= 8'h00;            // Channel N LSB (@TODO: send null value at the momment)
+                                            com_tx_data_push <= 1'b1;       // Push data
+                                            main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
+                                            current_channel <= current_channel + 1;
+                                            cmd_pos <= 1; // Go back to "3'd2" (MSB of next channel) after increased by TX_NEXT
+                                        end
+                                    endcase
                                 end
                         end else begin
                             main_state <= STATE_SEND_FINALIZE;
@@ -2144,6 +2168,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end else begin
                         // No more commands, input parsing complete
                         $display("[CONTROLLER] All input commands processed, returning to polling");
+                        jvs_data_ready_joy <= 1'b1; // Signal that input data is ready for gaming
                         main_state <= STATE_SEND_INPUTS;
                     end
                 end
@@ -2731,102 +2756,4 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
         end
     end
 
-    //=========================================================================
-    // RX STATE MACHINE - PROCESSES INCOMING JVS RESPONSES
-    //=========================================================================
-    // Handles byte-by-byte reception of JVS frames with checksum validation
-    
-    always @(posedge i_clk) begin
-        com_src_cmd_next <= 1'b0;
-    //initial content for simulation without JVS device
-    `ifdef USE_DUMMY_JVS_DATA
-        jvs_nodes_r2 <= JVS_INFO_INIT;
-    `endif
-
-        jvs_data_ready_joy <= 1'b0;
-
-        if (i_rst || !i_ena) begin
-            // Initialize output registers
-            
-            // Initialize JVS node information (single node only)
-            jvs_nodes_r.node_id[0] <= 8'h01;
-            jvs_nodes_r.node_cmd_ver[0] <= 8'h00;
-            jvs_nodes_r.node_jvs_ver[0] <= 8'h00;
-            jvs_nodes_r.node_com_ver[0] <= 8'h00;
-            jvs_nodes_r.node_players[0] <= 4'h0;
-            jvs_nodes_r.node_buttons[0] <= 8'h0;
-            jvs_nodes_r.node_analog_channels[0] <= 4'h0;
-            jvs_nodes_r.node_rotary_channels[0] <= 4'h0;
-            // Additional input capabilities (not yet supported)
-            jvs_nodes_r.node_has_keycode_input[0] <= 1'b0;
-            jvs_nodes_r.node_has_screen_pos[0] <= 1'b0;
-            jvs_nodes_r.node_screen_pos_x_bits[0] <= 8'h0;
-            jvs_nodes_r.node_screen_pos_y_bits[0] <= 8'h0;
-            // Initialize has_screen_pos output
-            has_screen_pos <= 1'b0;
-            jvs_nodes_r.node_misc_digital_inputs[0] <= 16'h0;
-            // Output capabilities
-            jvs_nodes_r.node_digital_outputs[0] <= 8'h0;
-            jvs_nodes_r.node_analog_output_channels[0] <= 4'h0;
-            jvs_nodes_r.node_card_system_slots[0] <= 8'h0;
-            jvs_nodes_r.node_medal_hopper_channels[0] <= 8'h0;
-            jvs_nodes_r.node_has_char_display[0] <= 1'b0;
-            jvs_nodes_r.node_char_display_width[0] <= 8'h0;
-            jvs_nodes_r.node_char_display_height[0] <= 8'h0;
-            jvs_nodes_r.node_char_display_type[0] <= 8'h0;
-            jvs_nodes_r.node_has_backup[0] <= 1'b0;
-            
-            // Initialize output button and joystick states
-            p1_btn_state <= 16'h0000;           // All buttons released
-            p1_joy_state <= 32'h80808080;       // Analog sticks centered (0x80 = center)
-            p2_btn_state <= 16'h0000;
-            p2_joy_state <= 32'h80808080;
-            p3_btn_state <= 16'h0000;
-            p4_btn_state <= 16'h0000;
-
-            // Initialize coin counters
-            coin_count[0] <= 16'h0000;
-            coin_count[1] <= 16'h0000;
-            coin_count[2] <= 16'h0000;
-            coin_count[3] <= 16'h0000;
-            
-        end else begin
-            // RX frame processing managed by jvs_com module
-            
-            
-            // Process incoming frames from jvs_com module
-            // For now, simplified processing - full RX parsing needs state machine implementation
-            if (com_rx_complete && !com_rx_error) begin
-                // Process response based on command that was sent
-                case (com_src_cmd)
-                    CMD_CMDREV, CMD_JVSREV, CMD_COMMVER: begin
-                        // Single byte responses - read version
-                        if (com_rx_remaining > 0) begin
-                            case (com_src_cmd)
-                                CMD_CMDREV: jvs_nodes_r.node_cmd_ver[current_device_addr - 1] <= com_rx_byte;
-                                CMD_JVSREV: jvs_nodes_r.node_jvs_ver[current_device_addr - 1] <= com_rx_byte;
-                                CMD_COMMVER: jvs_nodes_r.node_com_ver[current_device_addr - 1] <= com_rx_byte;
-                            endcase
-                        end
-                    end
-                    
-                    CMD_SWINP: begin
-                        // Signal input data ready for gaming
-                        jvs_data_ready_joy <= 1'b1;
-                    end
-                    
-                    default: begin
-                        // For other commands (IOIDENT, FEATCHK, etc.), acknowledge receipt
-                        // Full parsing implementation will be added in future updates
-                    end
-                endcase
-                
-                // Handle chained commands by advancing to next command
-                if (com_src_cmd_count > 1) begin
-                    com_src_cmd_next <= 1'b1;
-                end
-            end
-        end
-    end
-     
 endmodule
