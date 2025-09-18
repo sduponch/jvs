@@ -68,8 +68,6 @@ module jvs_com
     // RS485 Timing Constants (in clock cycles at 48MHz)
     localparam logic [15:0] RS485_SETUP_CYCLES = MASTER_CLK_FREQ / 100_000; // ~10µs
     localparam logic [15:0] RS485_HOLD_CYCLES = MASTER_CLK_FREQ / 33_333; // ~30µs
-    //localparam RS485_SETUP_CYCLES = 480;   // 10μs at 48MHz
-    //localparam RS485_HOLD_CYCLES  = 1440;  // 30μs at 48MHz
     
     // JVS Protocol Constants
     localparam JVS_CHECKSUM_SIZE = 1;      // Checksum is 1 byte
@@ -389,8 +387,8 @@ module jvs_com
                     // RS485 setup delay (10μs)
                     if (tx_timer < RS485_SETUP_CYCLES) begin
                         tx_timer <= tx_timer + 1;
-                    end else begin
                         rs485_tx_enable <= 1'b1;
+                    end else begin
                         tx_timer <= 0;
                         tx_checksum <= 0;
                         tx_data_idx <= 0;
