@@ -5,9 +5,9 @@
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/jvs_node_info_pkg.sv]
 
 # JVS Protocol Layer
-set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) jvs_controller.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) jvs_ctrl.sv]
 
 # JVS Communication Layer
-set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) jvscom/jvs_com.sv]
-set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) jvscom/uart_rx.v]
-set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) jvscom/uart_tx.v]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) jvs_com.sv]
+set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) uart_rx.v]
+set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) uart_tx.v]

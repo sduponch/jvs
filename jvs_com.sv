@@ -20,7 +20,6 @@
 // Incompatible: "No Brand;NAOMI Converter98701;ver2.0" (frames are ignored)
 //////////////////////////////////////////////////////////////////////
 
-
 module jvs_com
 #(
     parameter MASTER_CLK_FREQ = 50_000_000,
@@ -653,27 +652,6 @@ module jvs_com
             rx_read_idx <= rx_read_idx + 1;
             rx_byte <= rx_buffer[rx_read_idx + 1];
             rx_remaining <= rx_remaining - 1;
-            
-            // Display complete frame with current position marker
-            /*
-            $write("[%0t] RX_NEXT: Frame [", $time);
-            for (int i = 0; i < rx_length_internal - 1; i++) begin
-                if (i == rx_read_idx + 1) begin
-                    $write("*%02X*", rx_buffer[i]);
-                end else begin
-                    $write("%02X", rx_buffer[i]);
-                end
-                if (i < rx_length_internal - 2) $write(" ");
-            end
-            $write("] remaining=%0d", rx_remaining - 1);
-            // Display command FIFO state
-            $write(" | FIFO[%0d]: [", cmd_count);
-            */
-            for (int i = 0; i < cmd_count; i++) begin
-                $write("0x%02X", cmd_fifo[(cmd_read_ptr + i) % 16]);
-                if (i < cmd_count - 1) $write(", ");
-            end
-            $display("]");
         end
         
         // Always output current command count

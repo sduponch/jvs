@@ -1,85 +1,3 @@
-//////////////////////////////////////////////////////////////////////
-// JVS Controller Module for Analogizer - ALPHA VERSION
-// Partial JVS Master implementation optimized for gaming performance
-// 
-// ⚠️  ALPHA STATUS - PARTIAL COMMAND IMPLEMENTATION ⚠️
-//
-// This module implements a JVS (JAMMA Video Standard) Master controller
-// that allows connecting JVS arcade cabinets to the Analogue Pocket 
-// through the Analogizer.
-//
-// IMPLEMENTATION STATUS (ALPHA ~30-40% complete):
-// Based on JVS Specification v3.0 (25 pages, 49 commands total)
-//
-// ✅ FULLY IMPLEMENTED (8/49 commands):
-//    - Reset (F0) - Double reset sequence with timing delays
-//    - Set Address (F1) - Single device addressing
-//    - IO Identity (10) - Device name string reading (up to 100 chars)
-//    - Command Revision (11) - Format revision detection (BCD)
-//    - JVS Revision (12) - Protocol version detection (BCD) 
-//    - Communications Version (13) - Communication system version
-//    - Feature Check (14) - Complete capability parsing with all function codes
-//    - Switch Inputs (20) - Digital buttons (2 players, 13 buttons each)
-//    - Analog Inputs (22) - Multi-channel 16-bit analog data
-//    - Generic Output 1 (32) - Digital GPIO control (3-byte format)
-//    - JVS escape sequences (D0 DF → E0, D0 CF → D0)
-//    - RS485 timing control with setup/hold delays
-//
-// 🟡 PARTIALLY IMPLEMENTED (4/49 commands):
-//    - Coin Inputs (21) - Command sent, status parsed but coin data ignored
-//    - Screen Position Inputs (25) - Basic X/Y coordinates (16-bit each)
-//    - Keycode Inputs (24) - Command sent, response skipped
-//    - Misc Switch Inputs (26) - Command sent, response skipped
-//
-// ❌ NOT IMPLEMENTED (37/49 commands):
-//    - Main ID (15) - Send main board identification to device
-//    - Rotary Inputs (23) - Rotary encoder data (parsed but ignored)
-//    - Remaining Payout (2E) - Medal hopper status and count
-//    - Data Retransmit (2F) - Checksum error recovery
-//    - Coin management: COINDEC (30), COININC (35), PAYINC (31), PAYDEC (36)
-//    - Advanced outputs: OUTPUT2 (37), OUTPUT3 (38), ANLOUT (33), CHAROUT (34)
-//    - Communication changes: COMMCHG (F2)
-//    - Manufacturer-specific commands (Taito TypeX, Namco, CyberLead LED)
-//    - Multi-device addressing (supports single device only)
-//    - Dynamic baud rate changes
-//    - Error recovery mechanisms
-//
-// PLANNED RESTRUCTURING:
-// This monolithic module will be split into:
-//   - jvs_com: Communication layer (UART, framing, escape sequences)
-//   - jvs_controller: Protocol layer (commands, parsing, state machines)
-//   - SNAC interface abstraction: Review interaction with SNAC module for
-//     better abstraction and future portability to MiSTer platform
-//
-// ARCHITECTURE (Current):
-// - RS485 State Machine: Manages transceiver direction and timing
-// - Main State Machine: Handles JVS protocol sequence and commands  
-// - RX State Machine: Processes incoming JVS responses with full parsing
-// - Two-buffer system: Raw buffer + processed buffer for unescaped data
-// - Node information management for device capabilities
-//
-// PROTOCOL COMPLIANCE:
-// - Physical Layer: RS-485 at 115200 baud (8N1) ✅
-// - Link Layer: SYNC(0xE0) + NODE + LENGTH + DATA + CHECKSUM ✅  
-// - Escape sequences: D0 DF → E0, D0 CF → D0 ✅
-// - Address assignment: Master=0x00, Slaves=0x01-0x1F ✅
-// - Initialization: Double reset + sequential addressing ✅
-// - Multi-device chaining: Infrastructure present but single device only
-//
-// HARDWARE REQUIREMENTS:
-// - External MAX485 or equivalent RS485 transceiver
-// - Proper 120Ω termination for reliable communication  
-// - JVS-compatible arcade cabinet
-// - SENSE line connection for proper device chaining (unused in single mode)
-//
-// I/O BOARD COMPATIBILITY:
-// ✅ WORKING:
-//    - NAJV2 (Tekken 7) - Full compatibility
-//    - NAJV (Time Crisis 4) - Full compatibility  
-//    - TAITO CORP Ver2.0 (Viewlix) - Full compatibility
-// ❌ NOT WORKING:
-//    - "No Brand;NAOMI Converter98701;ver2.0" - Frames ignored
-//
 // Author: Totaly FuRy - Sebastien DUPONCHEEL (sduponch on GitHub)
 // Project: Analogizer JVS Controller
 // Status: Alpha - Partial Implementation
@@ -93,7 +11,7 @@
 
 import jvs_node_info_pkg::*;
 
-module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
+module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
 (
     // System clock and control signals
     input logic i_clk,        // System clock (typically 50MHz)
@@ -205,7 +123,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
         // UART Physical Interface
         .uart_rx(i_uart_rx),
         .uart_tx(o_uart_tx),
-        .o_rs485_dir(o_rx485_dir),          // RS485 direction control (active-high)
+        .o_rs485_dir(o_rx485_dir),          // RS485 direction control (TX=1, RX=0)
         
         // TX Interface
         .tx_data(com_tx_data),
@@ -466,11 +384,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     // STATE MACHINE DEFINITIONS
     //=========================================================================
     
-    //=========================================================================
-    // MAIN JVS PROTOCOL STATE MACHINE (6-bit states)
-    // Controls overall JVS protocol sequence from initialization to input polling
-    //=========================================================================
-    
     // INITIALIZATION SEQUENCE STATES (5.4s + 2s + 0.5s delays)
     localparam STATE_IDLE = 6'h00;             // Idle state - continuous input polling (1ms interval)
     localparam STATE_INIT_DELAY = 6'h02;       // Initial 5.4s delay for system stabilization
@@ -557,8 +470,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     // OUTPUT COMMANDS
     localparam RX_PARSE_OUTPUT1 = 6'h3B;        // Parse digital output (32) response
     
-    
-    
     //=========================================================================
     // STATE VARIABLES AND CONTROL REGISTERS
     //=========================================================================
@@ -568,21 +479,19 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     // TX state management for sequential byte transmission
     logic [5:0] return_state;      // State to return to after TX_NEXT (6-bit for extended states)
     logic [7:0] cmd_pos;           // Position in current command sequence (was [2:0] - caused overflow)
-    logic [3:0] current_coin;      // Current coin slot being parsed (0-3)
-    
-    // Temporary variables for coin parsing
-    logic [1:0] temp_coin_condition;
-    logic [5:0] temp_counter_msb;
-    
+
     // Timing and protocol control
     logic [31:0] delay_counter;    // Multi-purpose delay counter
     logic [31:0] timeout_counter;  // Timeout counter for waiting states
     logic [31:0] poll_timer;       // Timer for input polling frequency
-    logic [7:0] current_device_addr; // Address assigned to JVS device (usually 0x01)
 
-    // Feature parsing control
+    logic [7:0] current_device_addr; // Address assigned to JVS device (usually 0x01)
+    // Temporary variables for parsing
     logic [7:0] current_func_code; // Store current function being parsed  
-    
+    logic [3:0] current_coin;      // Current coin slot being parsed (0-3)   
+    logic [1:0] temp_coin_condition;
+    logic [5:0] temp_counter_msb;
+
     //=========================================================================
     // JVS NODE INFORMATION STRUCTURES
     //=========================================================================
@@ -644,19 +553,16 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
     end
 
     //=========================================================================
-    // JVS DATA READY SIGNAL
+    // JVS DATA READY SIGNAL FOR OSD Display
     //=========================================================================
     logic jvs_data_ready_init, jvs_data_ready_joy;
     assign jvs_data_ready = jvs_data_ready_init | jvs_data_ready_joy;
     
     //=========================================================================
     // MAIN STATE MACHINE - JVS PROTOCOL HANDLER
-    //=========================================================================
-    // Implements the complete JVS initialization sequence and input polling
-    
+    //=========================================================================  
     always @(posedge i_clk) begin
-
-        jvs_data_ready_init <= 1'b0;
+        jvs_data_ready_joy <= 1'b0; // signal for OSD
 
         // Update delayed register for edge detection
         com_rx_complete_d <= com_rx_complete;
@@ -669,25 +575,27 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
         com_src_cmd_next <= 1'b0;
 
         if (i_rst || !i_ena) begin
-            // Initialize all state variables on reset
-            main_state <= STATE_INIT_DELAY;
-            delay_counter <= 32'h0;
-            timeout_counter <= 32'h0;
-            poll_timer <= 32'h0;
-            current_device_addr <= 8'h01;    // Standard JVS device address
-            
-            // Initialize TX state management
-            return_state <= 6'h0;
-            cmd_pos <= 8'h0;
-            
+            // Initialize edge detection register
+            com_rx_complete_d <= 1'b0;
             // Initialize jvs_com control signals
-            com_tx_data <= 8'h00;
             com_tx_data_push <= 1'b0;
             com_tx_cmd_push <= 1'b0;
-            com_dst_node <= 8'h00;
             com_commit <= 1'b0;
             com_rx_next <= 1'b0;
             com_src_cmd_next <= 1'b0;
+            com_tx_data <= 8'h00;
+            com_dst_node <= 8'h00;
+
+            // Initialize all state variables on reset
+            main_state <= STATE_INIT_DELAY;
+
+            delay_counter <= 32'h0;
+            timeout_counter <= 32'h0;
+            poll_timer <= 32'h0;
+          
+            // Initialize TX state management
+            return_state <= 6'h0;
+            cmd_pos <= 8'h0; // genrale parsing pointer
 
             // Initialize output button and joystick states
             p1_btn_state <= 16'h0000;           // All buttons released
@@ -703,6 +611,8 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             coin_count[2] <= 16'h0000;
             coin_count[3] <= 16'h0000;
 
+            jvs_nodes_r.node_count <= 8'h00;
+            current_device_addr <= 8'h01;    // Standard JVS device address
             // Initialize JVS node information (single node only)
             jvs_nodes_r.node_id[0] <= 8'h01;
             jvs_nodes_r.node_cmd_ver[0] <= 8'h00;
@@ -712,13 +622,12 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             jvs_nodes_r.node_buttons[0] <= 8'h0;
             jvs_nodes_r.node_analog_channels[0] <= 4'h0;
             jvs_nodes_r.node_rotary_channels[0] <= 4'h0;
-            // Additional input capabilities (not yet supported)
             jvs_nodes_r.node_has_keycode_input[0] <= 1'b0;
+            // Initialize has_screen_pos output
+            has_screen_pos <= 1'b0;
             jvs_nodes_r.node_has_screen_pos[0] <= 1'b0;
             jvs_nodes_r.node_screen_pos_x_bits[0] <= 8'h0;
             jvs_nodes_r.node_screen_pos_y_bits[0] <= 8'h0;
-            // Initialize has_screen_pos output
-            has_screen_pos <= 1'b0;
             jvs_nodes_r.node_misc_digital_inputs[0] <= 16'h0;
             // Output capabilities
             jvs_nodes_r.node_digital_outputs[0] <= 8'h0;
@@ -730,19 +639,13 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
             jvs_nodes_r.node_char_display_height[0] <= 8'h0;
             jvs_nodes_r.node_char_display_type[0] <= 8'h0;
             jvs_nodes_r.node_has_backup[0] <= 1'b0;
-
-            // Initialize edge detection register
-            com_rx_complete_d <= 1'b0;
         end else begin
+            jvs_data_ready_init <= 1'b0; // data ready is a pulse
             case (main_state)
                 //-------------------------------------------------------------
                 // IDLE STATE - Continuous input polling for responsive gaming
                 //-------------------------------------------------------------
                 STATE_IDLE: begin
-                    
-                    // Fast polling timer for inputs - 1ms interval
-                    // This provides responsive gaming experience with minimal latency
-                    //if (poll_timer < 32'h0C350) begin  // 50,000 cycles = 1ms at 50MHz
                     if (poll_timer < POLL_INTERVAL_COUNT) begin  // 1ms
                         poll_timer <= poll_timer + 1;
                     end else begin
@@ -757,7 +660,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 STATE_INIT_DELAY: begin
                     // Initial delay for core I/O initialization - 5.4 seconds
                     // This ensures the FPGA core and external circuits are fully stable
-                    //if (delay_counter < 32'h10000000) begin  // 268,435,456 cycles ≈ 5.4s at 50MHz
                     if (delay_counter < INIT_DELAY_COUNT) begin  // 5.4 seconds
                         delay_counter <= delay_counter + 1;
                     end else begin
@@ -801,10 +703,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // DELAY AFTER FIRST RESET
                 //-------------------------------------------------------------
                 STATE_FIRST_RESET_DELAY: begin
-
                     // 2 second delay after first RESET
-                    // Allows JVS devices to complete their reset sequence
-                    //if (delay_counter < 32'h6000000) begin  // 100,663,296 cycles = 2s at 50MHz
                     if (delay_counter <FIRST_RESET_DELAY_COUNT) begin  //   2 seconds
                         delay_counter <= delay_counter + 1;
                     end else begin
@@ -848,8 +747,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 //-------------------------------------------------------------
                 STATE_SECOND_RESET_DELAY: begin
                     // 500ms delay after second RESET
-                    // Shorter delay as devices should be ready after two resets
-                    //if (delay_counter < 32'h1800000) begin  // 25,165,824 cycles = 500ms at 50MHz
+                    // Shorter delay as devices should be ready after two resets 
                     if (delay_counter < SECOND_RESET_DELAY_COUNT) begin  // 500ms
                         delay_counter <= delay_counter + 1;
                     end else begin
@@ -863,26 +761,30 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 //-------------------------------------------------------------
                 STATE_SEND_SETADDR: begin
                     // Send SET ADDRESS command using sequential byte transmission
-                    // This assigns a unique address (0x01) to the JVS device
+                    return_state <= STATE_SEND_SETADDR; // STATE TO GO BACK from STATE_TX_NEXT
                     if (com_tx_ready) begin
-                        $display("[CONTROLLER][STATE_SEND_SETADDR] cmd_pos 0x%02X", cmd_pos);
+                        if (i_sense == 1'b0) begin
+                            // @TODO: Loop until i_sense goes high that indicate that all nodes are initialized
+                            // jvs_node_r <= current_device_addr
+                            // current_device_addr <= current_device_addr + 1
+                        end
                         // Initialize command parameters on first entry
-                        com_dst_node <= JVS_BROADCAST_ADDR;  // FF - Still broadcast for address assignment
-                        return_state <= STATE_SEND_SETADDR;
-                        main_state <= STATE_TX_NEXT;
+                        com_dst_node <= JVS_BROADCAST_ADDR;
+                        main_state <= STATE_TX_NEXT; // State to pulse jvscom and push byte
                         // Select byte and signal based on position
                         case (cmd_pos)
                             3'd0: begin
                                 com_tx_data <= CMD_SETADDR;         // Set address command (0xF1)
-                                com_tx_cmd_push <= 1'b1;            // Push as command
+                                com_tx_cmd_push <= 1'b1;            // Push as command to store in jvscom FIFO for answer parsing
                                 main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
                             end
                             3'd1: begin
-                                com_tx_data <= current_device_addr; // 01 - Address to assign
+                                com_tx_data <= current_device_addr; // Address to assign
                                 com_tx_data_push <= 1'b1;           // Push as data
                             end
                             default: begin
                                 // All bytes sent, commit and transition
+                                cmd_pos <= 3'd0; // @TODO: STATE_TX_NEXT should automatically reset com_pos to 0
                                 com_commit <= 1'b1;
                                 main_state <= STATE_WAIT_RX;
                             end
@@ -894,19 +796,15 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // PARSE SETADDR RESPONSE - Verify address assignment
                 //-------------------------------------------------------------
                 RX_PARSE_SETADDR: begin
-                    $display("[CONTROLLER][RX_PARSE_SETADDR] cmd_pos 0x%02X, rx_byte 0x%02X", cmd_pos, com_rx_byte);
                     return_state <= RX_PARSE_SETADDR;
                     case (cmd_pos)
                         3'd0: begin
                             com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
                             // Check REPORT byte
                             if (com_rx_byte == REPORT_NORMAL) begin
-                                $display("[CONTROLLER][RX_PARSE_SETADDR] Address %d accepted %d", current_device_addr, com_rx_remaining);
                                 com_rx_next <= 1'b1;     // Advance to first name character
                                 main_state <= STATE_RX_NEXT;
                             end else begin
-                                $display("[CONTROLLER][RX_PARSE_SETADDR] ERROR: Bad REPORT 0x%02X for SETADDR", com_rx_byte);
-                                $display("[CONTROLLER][FATAL_ERROR] SETADDR failed - device rejected address assignment");
                                 main_state <= STATE_FATAL_ERROR;
                             end
                         end
@@ -916,7 +814,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             delay_counter <= SETADDR_TO_IOIDENT_DELAY;
                             return_state <= STATE_SEND_IOIDENT;
                             main_state <= STATE_MAIN_TIMER_DELAY;
-                            $display("[CONTROLLER] SETADDR complete, adding %0d cycle delay before IOIDENT", SETADDR_TO_IOIDENT_DELAY);
                         end
                     endcase
                 end
@@ -926,7 +823,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 //-------------------------------------------------------------
                 STATE_SEND_IOIDENT: begin
                     if (com_tx_ready) begin
-                        $display("[CONTROLLER][STATE_SEND_IOIDENT] cmd_pos 0x%02X", cmd_pos);
                         // Initialize command parameters on first entry
                         com_dst_node <= current_device_addr; // 01 - Address specific device
                         return_state <= STATE_SEND_IOIDENT;
@@ -961,8 +857,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 com_rx_next <= 1'b1;     // Advance to first name character
                                 main_state <= STATE_RX_NEXT;
                             end else begin
-                                $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for IOIDENT", com_rx_byte);
-                                $display("[CONTROLLER][FATAL_ERROR] IOIDENT failed - device cannot provide identification");
                                 main_state <= STATE_FATAL_ERROR;
                             end
                         end
@@ -972,20 +866,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 if (com_rx_byte == 8'h00) begin
                                     // Found null terminator, store it and finish copying
                                     jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
-                                    /*
-                                    $display("[CONTROLLER][RX_PARSE_IOIDENT] Name copy complete, %d chars %d", copy_write_idx, com_rx_remaining);
-                                    $write("[CONTROLLER][RX_PARSE_IOIDENT] Device name: ");
-                                    for (int i = 0; i < copy_write_idx; i++) begin
-                                        $write("%c", jvs_nodes_r.node_name[current_device_addr - 1][i]);
-                                    end
-                                    $display("");
-                                    */
                                     cmd_pos <= 8'd0;  // Reset position for next command
                                     // Add delay before sending CMDREV command
                                     delay_counter <= IOIDENT_TO_CMDREV_DELAY;
                                     return_state <= STATE_SEND_CMDREV;
                                     main_state <= STATE_MAIN_TIMER_DELAY;
-                                    $display("[CONTROLLER] IOIDENT complete, adding %0d cycle delay before CMDREV", IOIDENT_TO_CMDREV_DELAY);
                                 end else if (copy_write_idx < jvs_node_info_pkg::NODE_NAME_SIZE - 1) begin
                                     // Copy character to node name buffer
                                     jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= com_rx_byte;
@@ -994,7 +879,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     main_state <= STATE_RX_NEXT;
                                 end else begin
                                     // Buffer full, skip remaining characters until null terminator
-                                    $display("[CONTROLLER][RX_PARSE_IOIDENT] Name buffer full, skipping chars");
                                     com_rx_next <= 1'b1;     // Advance to first name character
                                     cmd_pos <= 8'd0;  // Reset position for next command
                                     delay_counter <= IOIDENT_TO_CMDREV_DELAY;
@@ -1003,7 +887,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 end
                             end else begin
                                 // End of data reached without null terminator
-                                $display("[CONTROLLER][RX_PARSE_IOIDENT] End of data reached, name copy complete");
                                 cmd_pos <= 8'd0;
                                 delay_counter <= IOIDENT_TO_CMDREV_DELAY;
                                 return_state <= STATE_SEND_CMDREV;
@@ -1017,9 +900,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // COMMAND REVISION REQUEST - Get command format revision
                 //-------------------------------------------------------------
                 STATE_SEND_CMDREV: begin
-                    $display("[CONTROLLER] STATE_SEND_CMDREV: com_tx_ready=%b, cmd_pos=%d", com_tx_ready, cmd_pos);
                     if (com_tx_ready) begin
-                        $display("[CONTROLLER][STATE_SEND_CMDREV] cmd_pos 0x%02X", cmd_pos);
                         // Initialize command parameters on first entry
                         main_state <= STATE_TX_NEXT;
                         com_dst_node <= current_device_addr; // 01 - Address specific device
@@ -1027,10 +908,8 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                         // Select byte and signal based on position
                         case (cmd_pos)
                             3'd0: begin
-                                $display("[CONTROLLER] Pushing CMDREV command: data=0x%02X", CMD_CMDREV);
                                 com_tx_data <= CMD_CMDREV;          // Command revision command (0x11)
                                 com_tx_cmd_push <= 1'b1;            // Push as command (ONLY this one!)
-                                $display("[CONTROLLER] com_tx_cmd_push set to 1");
                                 main_state <= STATE_TX_NEXT;        // Go to TX_NEXT
                             end
                             default: begin
@@ -1039,8 +918,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 main_state <= STATE_WAIT_RX;
                             end
                         endcase
-                    end else begin
-                        $display("[CONTROLLER] Waiting for com_tx_ready...");
                     end
                 end
                 
@@ -1048,31 +925,25 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // PARSE CMDREV RESPONSE - Extract command revision
                 //-------------------------------------------------------------
                 RX_PARSE_CMDREV: begin
-                    $display("[CONTROLLER][RX_PARSE_CMDREV] cmd_pos 0x%02X, rx_byte 0x%02X", cmd_pos, com_rx_byte);
                     return_state <= RX_PARSE_CMDREV;
                     case (cmd_pos)
                         3'd0: begin
                             com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
                             // Check REPORT byte
                             if (com_rx_byte == REPORT_NORMAL) begin
-                                $display("[CONTROLLER][RX_PARSE_CMDREV] REPORT_NORMAL received");
                                 com_rx_next <= 1'b1;     // Advance to revision data
                                 main_state <= STATE_RX_NEXT;
                             end else begin
-                                $display("[CONTROLLER][RX_PARSE_CMDREV] ERROR: Bad REPORT 0x%02X for CMDREV", com_rx_byte);
-                                $display("[CONTROLLER][FATAL_ERROR] CMDREV failed - device cannot provide command revision");
                                 main_state <= STATE_FATAL_ERROR;
                             end
                         end
                         3'd1: begin
                             // Store command revision (BCD format)
                             jvs_nodes_r.node_cmd_ver[current_device_addr - 1] <= com_rx_byte;
-                            $display("[CONTROLLER][RX_PARSE_CMDREV] Command revision stored: 0x%02X", com_rx_byte);
                             cmd_pos <= 8'd0;          // Reset position for next command
                             delay_counter <= CMDREV_TO_JVSREV_DELAY;
                             return_state <= STATE_SEND_JVSREV;
                             main_state <= STATE_MAIN_TIMER_DELAY;
-                            $display("[CONTROLLER] CMDREV complete, adding %0d cycle delay before JVSREV", CMDREV_TO_JVSREV_DELAY);
                         end
                         default: begin
                             cmd_pos <= 8'd0;          // Reset position for next command
@@ -1111,31 +982,25 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // PARSE JVSREV RESPONSE - Extract JVS revision
                 //-------------------------------------------------------------
                 RX_PARSE_JVSREV: begin
-                    $display("[CONTROLLER][RX_PARSE_JVSREV] cmd_pos 0x%02X, rx_byte 0x%02X", cmd_pos, com_rx_byte);
                     return_state <= RX_PARSE_JVSREV;
                     case (cmd_pos)
                         3'd0: begin
                             com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
                             // Check REPORT byte
                             if (com_rx_byte == REPORT_NORMAL) begin
-                                $display("[CONTROLLER][RX_PARSE_JVSREV] REPORT_NORMAL received");
                                 com_rx_next <= 1'b1;     // Advance to revision data
                                 main_state <= STATE_RX_NEXT;
                             end else begin
-                                $display("[CONTROLLER][RX_PARSE_JVSREV] ERROR: Bad REPORT 0x%02X for JVSREV", com_rx_byte);
-                                $display("[CONTROLLER][FATAL_ERROR] JVSREV failed - device cannot provide JVS revision");
                                 main_state <= STATE_FATAL_ERROR;
                             end
                         end
                         3'd1: begin
                             // Store JVS revision (BCD format)
                             jvs_nodes_r.node_jvs_ver[current_device_addr - 1] <= com_rx_byte;
-                            $display("[CONTROLLER][RX_PARSE_JVSREV] JVS revision stored: 0x%02X", com_rx_byte);
                             cmd_pos <= 8'd0;          // Reset position for next command
                             delay_counter <= JVSREV_TO_COMMVER_DELAY;
                             return_state <= STATE_SEND_COMMVER;
                             main_state <= STATE_MAIN_TIMER_DELAY;
-                            $display("[CONTROLLER] JVSREV complete, adding %0d cycle delay before COMMVER", JVSREV_TO_COMMVER_DELAY);
                         end
                         default: begin
                             cmd_pos <= 8'd0;          // Reset position for next command
@@ -1175,31 +1040,25 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // PARSE COMMVER RESPONSE - Extract communications version
                 //-------------------------------------------------------------
                 RX_PARSE_COMMVER: begin
-                    $display("[CONTROLLER][RX_PARSE_COMMVER] cmd_pos 0x%02X, rx_byte 0x%02X", cmd_pos, com_rx_byte);
                     return_state <= RX_PARSE_COMMVER;
                     case (cmd_pos)
                         3'd0: begin
                             com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
                             // Check REPORT byte
                             if (com_rx_byte == REPORT_NORMAL) begin
-                                $display("[CONTROLLER][RX_PARSE_COMMVER] REPORT_NORMAL received");
                                 com_rx_next <= 1'b1;     // Advance to revision data
                                 main_state <= STATE_RX_NEXT;
                             end else begin
-                                $display("[CONTROLLER][RX_PARSE_COMMVER] ERROR: Bad REPORT 0x%02X for COMMVER", com_rx_byte);
-                                $display("[CONTROLLER][FATAL_ERROR] COMMVER failed - device cannot provide communications version");
                                 main_state <= STATE_FATAL_ERROR;
                             end
                         end
                         3'd1: begin
                             // Store communications version (BCD format)
                             jvs_nodes_r.node_com_ver[current_device_addr - 1] <= com_rx_byte;
-                            $display("[CONTROLLER][RX_PARSE_COMMVER] Communications version stored: 0x%02X", com_rx_byte);
                             cmd_pos <= 8'd0;          // Reset position for next command
                             delay_counter <= COMMVER_TO_FEATURES_DELAY;
                             return_state <= STATE_SEND_FEATCHK;
                             main_state <= STATE_MAIN_TIMER_DELAY;
-                            $display("[CONTROLLER] COMMVER complete, adding %0d cycle delay before FEATCHK", COMMVER_TO_FEATURES_DELAY);
                         end
                         default: begin
                             cmd_pos <= 8'd0;          // Reset position for next command
@@ -1240,158 +1099,121 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 RX_PARSE_FEATURES: begin
-                    $display("[CONTROLLER][RX_PARSE_FEATURES] cmd_pos 0x%02X, rx_byte 0x%02X", cmd_pos, com_rx_byte);
                     return_state <= RX_PARSE_FEATURES;
                     case (cmd_pos)
                         3'd0: begin
                             // Check REPORT byte
                             com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
                             if (com_rx_byte == REPORT_NORMAL) begin
-                                $display("[CONTROLLER][FEATCHK] Report Normal");
                                 com_rx_next <= 1'b1;
                                 return_state <= RX_PARSE_FEATURES_FUNCS;
                                 main_state <= STATE_RX_NEXT;
                                 cmd_pos <= 0; // set cmd_pos to 0 for functions parsing, RX_NEXT increment cmd_pos so func parsing start a 1
                             end else begin
-                                $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for COMMVER", com_rx_byte);
                                 main_state <= STATE_WAIT_RX;
                             end
                         end
                     endcase
                 end
                 RX_PARSE_FEATURES_FUNCS: begin
-                    $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] cmd_pos 0x%02X, rx_byte 0x%02X, rx_remaining=%d", cmd_pos, com_rx_byte, com_rx_remaining);
                     return_state <= RX_PARSE_FEATURES_FUNCS;
                     if (com_rx_remaining > 0) begin
                         case (cmd_pos)
                             3'd1: begin // FUNC
                                 if (com_rx_byte == 8'h00) begin
                                     // Terminator found - feature parsing complete
-                                    $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Feature parsing complete (terminator found)");
-                                    $display("[CONTROLLER] *** JVS INITIALIZATION COMPLETE - ACTIVATING jvs_data_ready_init ***");
                                     jvs_data_ready_init <= 1'b1;
                                     cmd_pos <= 8'd0;
                                     // Add delay before going to input polling
                                     delay_counter <= FEATURES_TO_IDLE_DELAY;
                                     return_state <= STATE_SEND_INPUTS;
                                     main_state <= STATE_MAIN_TIMER_DELAY;
-                                    $display("[CONTROLLER] FEATURES complete, adding %0d cycle delay before polling", FEATURES_TO_IDLE_DELAY);
                                 end else begin
                                     // Store function code and continue
                                     current_func_code <= com_rx_byte;
-                                    $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Parsing function 0x%02X", com_rx_byte);
                                     main_state <= STATE_RX_NEXT;
                                     com_rx_next <= 1'b1;
                                 end
                             end
                             3'd2: begin // ARG1
-                                $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Parsing arg1 0x%02X for func 0x%02X", com_rx_byte, current_func_code);
                                 case (current_func_code)
                                     FUNC_INPUT_DIGITAL: begin
                                         jvs_nodes_r.node_players[current_device_addr - 1] <= com_rx_byte[3:0];
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Digital: %d players", com_rx_byte[3:0]);
                                     end
                                     FUNC_INPUT_COIN: begin
                                         jvs_nodes_r.node_coin_slots[current_device_addr - 1] <= com_rx_byte[3:0];
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Coin: %d slots", com_rx_byte[3:0]);
                                     end
                                     FUNC_INPUT_ANALOG: begin
                                         jvs_nodes_r.node_analog_channels[current_device_addr - 1] <= com_rx_byte[3:0];
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Analog: %d channels", com_rx_byte[3:0]);
                                     end
                                     FUNC_INPUT_ROTARY: begin
                                         jvs_nodes_r.node_rotary_channels[current_device_addr - 1] <= com_rx_byte[3:0];
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Rotary: %d channels", com_rx_byte[3:0]);
                                     end
                                     FUNC_INPUT_KEYCODE: begin
                                         jvs_nodes_r.node_has_keycode_input[current_device_addr - 1] <= 1'b1;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Keycode input supported");
                                     end
                                     FUNC_INPUT_SCREEN_POS: begin
                                         jvs_nodes_r.node_screen_pos_x_bits[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Screen: %d X bits", com_rx_byte);
                                     end
                                     FUNC_INPUT_MISC_DIGITAL: begin
                                         jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1][15:8] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Misc digital: MSB=0x%02X", com_rx_byte);
                                     end
                                     FUNC_OUTPUT_CARD: begin
                                         jvs_nodes_r.node_card_system_slots[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] %d Cards system present", com_rx_byte);
                                     end
                                     FUNC_OUTPUT_HOPPER: begin
                                         jvs_nodes_r.node_medal_hopper_channels[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] %d Medal Hopper channels", com_rx_byte);
                                     end
                                     FUNC_OUTPUT_DIGITAL: begin
                                         jvs_nodes_r.node_digital_outputs[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Digital outputs: %d channels", com_rx_byte);
                                     end
                                     FUNC_OUTPUT_ANALOG: begin
                                         jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] <= com_rx_byte[3:0];
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Analog outputs: %d channels", com_rx_byte[3:0]);
                                     end
                                     FUNC_OUTPUT_CHAR: begin
                                         jvs_nodes_r.node_has_char_display[current_device_addr - 1] <= 1'b1;
                                         jvs_nodes_r.node_char_display_width[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Character display: %d width", com_rx_byte);
                                     end
                                     FUNC_OUTPUT_BACKUP: begin
                                         jvs_nodes_r.node_has_backup[current_device_addr - 1] <= 1'b1;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Backup present");
                                     end
                                     default: begin
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Unknown function 0x%02X, arg1=0x%02X", current_func_code, com_rx_byte);
+                                        main_state <= STATE_FATAL_ERROR;
                                     end
                                 endcase
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end
                             3'd3: begin // ARG2
-                                $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Parsing arg2 0x%02X for func 0x%02X", com_rx_byte, current_func_code);
                                 case (current_func_code)
                                     FUNC_INPUT_DIGITAL: begin
                                         jvs_nodes_r.node_buttons[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Digital: %d buttons per player", com_rx_byte);
                                     end
                                     FUNC_INPUT_ANALOG: begin
                                         jvs_nodes_r.node_analog_bits[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Analog: %d bits resolution", com_rx_byte);
                                     end
                                     FUNC_INPUT_SCREEN_POS: begin
                                         jvs_nodes_r.node_screen_pos_y_bits[current_device_addr - 1] <= com_rx_byte;
                                         jvs_nodes_r.node_has_screen_pos[current_device_addr - 1] <= 1'b1;
                                         has_screen_pos <= 1'b1;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Screen: %d Y bits", com_rx_byte);
                                     end
                                     FUNC_INPUT_MISC_DIGITAL: begin
                                         jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1][7:0] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Misc digital: LSB=0x%02X", com_rx_byte);
                                     end
                                     FUNC_OUTPUT_CHAR: begin
                                         jvs_nodes_r.node_char_display_height[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Character display: %d height", com_rx_byte);
-                                    end
-                                    default: begin
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Function 0x%02X arg2=0x%02X (unused)", current_func_code, com_rx_byte);
                                     end
                                 endcase
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end
                             3'd4: begin // ARG3
-                                $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Parsing arg3 0x%02X for func 0x%02X", com_rx_byte, current_func_code);
                                 case (current_func_code)
                                     FUNC_INPUT_SCREEN_POS: begin
                                         jvs_nodes_r.node_screen_pos_channels[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Screen: %d channels", com_rx_byte);
                                     end
                                     FUNC_OUTPUT_CHAR: begin
                                         jvs_nodes_r.node_char_display_type[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Character display: type 0x%02X", com_rx_byte);
-                                    end
-                                    default: begin
-                                        $display("[CONTROLLER][RX_PARSE_FEATURES_FUNCS] Function 0x%02X arg3=0x%02X (unused)", current_func_code, com_rx_byte);
                                     end
                                 endcase
                                 main_state <= STATE_RX_NEXT;
@@ -1452,8 +1274,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
                                 default: begin
-                                    // All bytes sent, commit and transition
-                                    //com_commit <= 1'b1;
                                     cmd_pos <= 8'd0;
                                     main_state <= STATE_SEND_INPUTS_COIN;
                                 end
@@ -1472,7 +1292,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 com_dst_node <= current_device_addr;
                                 return_state <= STATE_SEND_INPUTS_COIN;
                             end
-
                             // Select byte and signal based on position
                             case (cmd_pos)
                                 3'd0: begin
@@ -1486,8 +1305,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                 end
                                 default: begin
-                                    // All bytes sent, commit and transition
-                                    //com_commit <= 1'b1;
                                     cmd_pos <= 8'd0;
                                     main_state <= STATE_SEND_INPUTS_ANALOG;
                                 end
@@ -1506,7 +1323,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 com_dst_node <= current_device_addr;
                                 return_state <= STATE_SEND_INPUTS_ANALOG;
                             end
-
                             // Select byte and signal based on position
                             case (cmd_pos)
                                 3'd0: begin
@@ -1722,7 +1538,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                         current_channel <= 8'd0;
                     end
                 end
-                // @TODO: Analog Output not supported (CMD_ANLOUT)
+                // Analog Output not supported (CMD_ANLOUT)
                 STATE_SEND_OUTPUT_ANALOG: begin // (CMD_ANLOUT)
                     // Check if device has analog outputs
                     if (jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] > 0) begin
@@ -1769,56 +1585,18 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                         main_state <= STATE_SEND_FINALIZE;
                     end
                 end
-                /*
-                Command name
-                    Analog Outputs
-                    byte0
-                    byte1
-                    byte2
-                    byte3
-                    ...
-                    byteN
-                    Request Data
-                    33, channel, data, ...
-                    33
-                    Command Code
-                    (02)
-                    Channel count
-                    (18)
-                    Channel 1 MSB
-                    (01)
-                    Channel 1 LSB
-                    ...
-                    ...
-                    (4A)
-                    Last Channel LSB
-                    Response Data
-                    01 (report)
-                    (01)
-                    –
-                    –
-                    –
-                    –
-                    –
-                    Report
-                    Outputs data to analog outputs. Analog data is always specified as 16 bits, with the valid bits being
-                    moved to the top, and the remainder set to 0. In this way, main board software does not need to know the
-                    precision of the analog data.
-                */
                 // @TODO: Characters Output not supported (CHAROUT)
-                // @TODO: Backup not support
+                // @TODO: Backup not supported
                 //-------------------------------------------------------------
                 // FINALIZE MULTI-COMMAND FRAME - Commit all accumulated commands
                 //-------------------------------------------------------------
                 STATE_SEND_FINALIZE: begin
-                    $display("[CONTROLLER][STATE_SEND_FINALIZE] Committing multi-command frame");
                     com_commit <= 1'b1;
                     cmd_pos <= 8'd0;
                     main_state <= STATE_WAIT_RX;
                 end
 
                 RX_PARSE_INPUT_CMD: begin
-                    $display("[CONTROLLER][RX_PARSE_INPUT_CMD] Parsing command 0x%02X, cmd_pos=%d, rx_byte=0x%02X, cmd_count=%d", com_src_cmd, cmd_pos, com_rx_byte, com_src_cmd_count);
                     // Check if there are commands in the FIFO
                     if (com_src_cmd_count > 0 && com_rx_remaining > 0) begin
                         // Parse based on current command in FIFO
@@ -1829,11 +1607,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         com_src_cmd_next <= 1'b1; // Flush FIFO to advance to next command
                                         // Check REPORT byte
                                         if (com_rx_byte == REPORT_NORMAL) begin
-                                            $display("[CONTROLLER][SETADDR] Address %d accepted", current_device_addr);
                                             cmd_pos <= 8'd0;
                                             main_state <= STATE_SEND_IOIDENT;
                                         end else begin
-                                            $display("[CONTROLLER][SETADDR] ERROR: Bad REPORT 0x%02X", com_rx_byte);
                                             main_state <= STATE_FATAL_ERROR;
                                         end
                                     end
@@ -1850,7 +1626,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER][IOIDENT] ERROR: Bad REPORT 0x%02X", com_rx_byte);
                                             main_state <= STATE_FATAL_ERROR;
                                         end
                                     end
@@ -1860,7 +1635,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             if (com_rx_byte == 8'h00) begin
                                                 // Found null terminator, store it and finish copying
                                                 jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
-                                                $display("[CONTROLLER][IOIDENT] Name copy complete, %d chars", copy_write_idx);
                                                 cmd_pos <= 8'd0;
                                                 main_state <= STATE_SEND_CMDREV;
                                             end else if (copy_write_idx < jvs_node_info_pkg::NODE_NAME_SIZE - 1) begin
@@ -1873,7 +1647,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             end else begin
                                                 // Name too long, truncate and finish
                                                 jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
-                                                $display("[CONTROLLER][IOIDENT] Name truncated at %d chars", copy_write_idx);
                                                 cmd_pos <= 8'd0;
                                                 main_state <= STATE_SEND_CMDREV;
                                             end
@@ -1896,14 +1669,12 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER][CMDREV] ERROR: Bad REPORT 0x%02X", com_rx_byte);
                                             main_state <= STATE_FATAL_ERROR;
                                         end
                                     end
                                     3'd1: begin
                                         // Store command revision (BCD format)
                                         jvs_nodes_r.node_cmd_ver[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][CMDREV] Command revision: 0x%02X", com_rx_byte);
                                         cmd_pos <= 8'd0;
                                         main_state <= STATE_SEND_JVSREV;
                                     end
@@ -1919,14 +1690,12 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER][JVSREV] ERROR: Bad REPORT 0x%02X", com_rx_byte);
                                             main_state <= STATE_FATAL_ERROR;
                                         end
                                     end
                                     3'd1: begin
                                         // Store JVS revision (BCD format)
                                         jvs_nodes_r.node_jvs_ver[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][JVSREV] JVS revision: 0x%02X", com_rx_byte);
                                         cmd_pos <= 8'd0;
                                         main_state <= STATE_SEND_COMMVER;
                                     end
@@ -1942,14 +1711,12 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER][COMMVER] ERROR: Bad REPORT 0x%02X", com_rx_byte);
                                             main_state <= STATE_FATAL_ERROR;
                                         end
                                     end
                                     3'd1: begin
                                         // Store communication version (BCD format)
                                         jvs_nodes_r.node_com_ver[current_device_addr - 1] <= com_rx_byte;
-                                        $display("[CONTROLLER][COMMVER] Communication version: 0x%02X", com_rx_byte);
                                         cmd_pos <= 8'd0;
                                         main_state <= STATE_SEND_FEATCHK;
                                     end
@@ -1965,7 +1732,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER][FEATCHK] ERROR: Bad REPORT 0x%02X", com_rx_byte);
                                             main_state <= STATE_FATAL_ERROR;
                                         end
                                     end
@@ -1977,7 +1743,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 endcase
                             end
                             default: begin
-                                $display("[CONTROLLER] Unknown command 0x%02X, advancing to next", com_src_cmd);
                                 com_src_cmd_next <= 1'b1;
                                 cmd_pos <= 0;
                                 return_state <= RX_PARSE_INPUT_CMD;
@@ -1988,12 +1753,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 case(cmd_pos)
                                     3'd0: begin
                                         if (com_rx_byte == REPORT_NORMAL) begin
-                                            $display("[CONTROLLER][RX_PARSE_INPUT_CMD][SWINP] Report Normal");
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER][RX_PARSE_INPUT_CMD][SWINP] ERROR: Bad REPORT 0x%02X for SWINP", com_rx_byte);
                                             com_src_cmd_next <= 1'b1;
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             cmd_pos <= 0;
@@ -2003,7 +1766,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         end
                                     end
                                     3'd1: begin
-                                        $display("[CONTROLLER][RX_PARSE_INPUT_CMD][SWINP] Consume System byte %02X for SWINP", com_rx_byte);
                                         current_player <= 4'd0; // initialise player idx
                                         return_state <= RX_PARSE_SWINP;
                                         cmd_pos <= 0;
@@ -2017,13 +1779,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     3'd0: begin
                                         // Check REPORT byte
                                         if (com_rx_byte == REPORT_NORMAL) begin
-                                            $display("[CONTROLLER][COININP] Report Normal");
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                             current_coin <= 0; // Initialize coin counter for parsing
                                         end else begin
-                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for COININP", com_rx_byte);
                                             com_src_cmd_next <= 1'b1;
                                             cmd_pos <= 0;
                                             return_state <= RX_PARSE_INPUT_CMD;
@@ -2034,7 +1794,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     end
                                     3'd1: begin
                                         // Dispatch to specialized ANLINP state
-                                        $display("[CONTROLLER] Dispatching to ANLINP specialized parser");
                                         return_state <= RX_PARSE_COININP;
                                         main_state <= RX_PARSE_COININP;
                                     end
@@ -2045,12 +1804,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     3'd0: begin
                                         // Check REPORT byte
                                         if (com_rx_byte == REPORT_NORMAL) begin
-                                            $display("[CONTROLLER][ANLINP] Report Normal");
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for ANLINP", com_rx_byte);
                                             com_src_cmd_next <= 1'b1;
                                             cmd_pos <= 0;
                                             return_state <= RX_PARSE_INPUT_CMD;
@@ -2060,7 +1817,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     end
                                     3'd1: begin
                                         // Dispatch to specialized ANLINP state
-                                        $display("[CONTROLLER] Dispatching to ANLINP specialized parser");
                                         cmd_pos <= 0;
                                         return_state <= RX_PARSE_ANLINP;
                                         main_state <= RX_PARSE_ANLINP;
@@ -2072,12 +1828,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     3'd0: begin
                                         // Check REPORT byte
                                         if (com_rx_byte == REPORT_NORMAL) begin
-                                            $display("[CONTROLLER][ROTINP] Report Normal");
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for ROTINP", com_rx_byte);
                                             com_src_cmd_next <= 1'b1;
                                             cmd_pos <= 0;
                                             return_state <= RX_PARSE_INPUT_CMD;
@@ -2086,12 +1840,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         end
                                     end
                                     default: begin
-                                        // Simple parsing - skip rotary data (not implemented)
-                                        $display("[CONTROLLER] Skipping ROTINP byte: 0x%02X", com_rx_byte);
                                         // Check if more data or advance to next command
                                         if (com_rx_remaining <= 1) begin
                                             // Last byte, advance to next command
-                                            $display("[CONTROLLER] ROTINP parsing complete");
                                             cmd_pos <= 0;
                                             com_src_cmd_next <= 1'b1;
                                         end
@@ -2106,12 +1857,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     3'd0: begin
                                         // Check REPORT byte
                                         if (com_rx_byte == REPORT_NORMAL) begin
-                                            $display("[CONTROLLER][KEYINP] Report Normal");
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for KEYINP", com_rx_byte);
                                             com_src_cmd_next <= 1'b1;
                                             cmd_pos <= 0;
                                             return_state <= RX_PARSE_INPUT_CMD;
@@ -2120,12 +1869,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         end
                                     end
                                     default: begin
-                                        // Simple parsing - skip keycode data (not implemented)
-                                        $display("[CONTROLLER] Skipping KEYINP byte: 0x%02X", com_rx_byte);
                                         // Check if more data or advance to next command
                                         if (com_rx_remaining <= 1) begin
                                             // Last byte, advance to next command
-                                            $display("[CONTROLLER] KEYINP parsing complete");
                                             cmd_pos <= 0;
                                             com_src_cmd_next <= 1'b1;
                                         end
@@ -2140,12 +1886,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     3'd0: begin
                                         // Check REPORT byte
                                         if (com_rx_byte == REPORT_NORMAL) begin
-                                            $display("[CONTROLLER][SCRPOSINP] Report Normal");
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for SCRPOSINP", com_rx_byte);
                                             com_src_cmd_next <= 1'b1;
                                             cmd_pos <= 0;
                                             return_state <= RX_PARSE_INPUT_CMD;
@@ -2155,7 +1899,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     end
                                     3'd1: begin
                                         // Dispatch to specialized SCRPOSINP state for screen position parsing
-                                        $display("[CONTROLLER] Dispatching to SCRPOSINP specialized parser");
                                         cmd_pos <= 0;
                                         return_state <= RX_PARSE_SCRPOSINP;
                                         main_state <= RX_PARSE_SCRPOSINP;
@@ -2167,12 +1910,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     3'd0: begin
                                         // Check REPORT byte
                                         if (com_rx_byte == REPORT_NORMAL) begin
-                                            $display("[CONTROLLER][MISCSWINP] Report Normal");
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for MISCSWINP", com_rx_byte);
                                             com_src_cmd_next <= 1'b1;
                                             cmd_pos <= 0;
                                             return_state <= RX_PARSE_INPUT_CMD;
@@ -2182,11 +1923,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     end
                                     default: begin
                                         // Simple parsing - skip misc digital data (not implemented)
-                                        $display("[CONTROLLER] Skipping MISCSWINP byte: 0x%02X", com_rx_byte);
                                         // Check if more data or advance to next command
                                         if (com_rx_remaining <= 1) begin
                                             // Last byte, advance to next command
-                                            $display("[CONTROLLER] MISCSWINP parsing complete");
                                             cmd_pos <= 0;
                                             com_src_cmd_next <= 1'b1;
                                         end
@@ -2201,12 +1940,10 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     3'd0: begin
                                         // Check REPORT byte
                                         if (com_rx_byte == REPORT_NORMAL) begin
-                                            $display("[CONTROLLER][OUTPUT1] Report Normal");
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end else begin
-                                            $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for OUTPUT1", com_rx_byte);
                                             com_src_cmd_next <= 1'b1;
                                             cmd_pos <= 0;
                                             return_state <= RX_PARSE_INPUT_CMD;
@@ -2216,11 +1953,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     end
                                     default: begin
                                         // Simple parsing - OUTPUT1 response is just acknowledgment, no complex data
-                                        $display("[CONTROLLER] OUTPUT1 acknowledgment byte: 0x%02X", com_rx_byte);
                                         // Check if more data or advance to next command
                                         if (com_rx_remaining <= 1) begin
                                             // Last byte, advance to next command
-                                            $display("[CONTROLLER] OUTPUT1 parsing complete");
                                             cmd_pos <= 0;
                                             com_src_cmd_next <= 1'b1;
                                         end
@@ -2233,23 +1968,19 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                         endcase
                     end else begin
                         // No more commands, input parsing complete
-                        $display("[CONTROLLER] All input commands processed, adding delay before next polling cycle");
                         jvs_data_ready_joy <= 1'b1; // Signal that input data is ready for gaming
                         // Add delay between polling cycles to avoid overwhelming the bus
                         delay_counter <= POLLING_INTERVAL_DELAY;
                         return_state <= STATE_SEND_INPUTS;
                         main_state <= STATE_MAIN_TIMER_DELAY;
-                        $display("[CONTROLLER] Polling cycle complete, adding %0d cycle delay before next cycle", POLLING_INTERVAL_DELAY);
                     end
                 end
                 
                 RX_PARSE_SWINP: begin
-                    $display("[CONTROLLER][RX_PARSE_SWINP] Player=%d, cmd_pos=%d, rx_byte=0x%02X", current_player, cmd_pos, com_rx_byte);
                     return_state <= RX_PARSE_SWINP;
                     case (current_player)
                         4'd0: begin // Player 1
                             if (cmd_pos == 1) begin
-                                $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P1 byte 1");
                                 // First player data byte
                                 p1_btn_state[15] <= com_rx_byte[7];  // START
                                 p1_btn_state[14] <= com_rx_byte[6];  // SELECT/SERVICE
@@ -2269,7 +2000,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
-                                $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P1 byte 2");
                                 // Second player data byte (additional buttons)
                                 p1_btn_state[6] <= com_rx_byte[7];   // X (push3)
                                 p1_btn_state[7] <= com_rx_byte[6];   // Y (push4)
@@ -2289,7 +2019,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
 
                         4'd1: begin // Player 2
                             if (cmd_pos == 1) begin
-                                $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P2 byte 1");
                                 // First player data byte
                                 p2_btn_state[15] <= com_rx_byte[7];  // START
                                 p2_btn_state[14] <= com_rx_byte[6];  // SELECT/SERVICE
@@ -2309,7 +2038,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
-                                $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P2 byte 2");
                                 // Second player data byte (additional buttons) - match your reference bit mapping
                                 p2_btn_state[6] <= com_rx_byte[7];   // X (push3)
                                 p2_btn_state[7] <= com_rx_byte[6];   // Y (push4)
@@ -2329,7 +2057,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
 
                         default: begin
                             if (current_player >= jvs_nodes_r.node_players[current_device_addr - 1]) begin
-                                $display("[CONTROLLER][RX_PARSE_SWINP] All players processed, advancing to next command");
                                 cmd_pos <= 0;
                                 com_src_cmd_next <= 1'b1;
                                 return_state <= RX_PARSE_INPUT_CMD;
@@ -2337,9 +2064,7 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 com_rx_next <= 1'b1;
                             end else begin
                                 // Additional players (if supported)
-                                $display("[CONTROLLER][RX_PARSE_SWINP] Skipping unsupported player %d", current_player);
                                 if (cmd_pos == 1) begin
-                                    $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P%d byte 1", current_player);
                                     if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
                                         // Only 1 byte per player, clear unused bits and advance to next player
                                         current_player <= current_player + 1;
@@ -2349,7 +2074,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     com_rx_next <= 1'b1;
                                 end
                                 if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
-                                    $display("[CONTROLLER][RX_PARSE_SWINP] Parsing P%d byte 2", current_player);
                                     // Advance to next player
                                     current_player <= current_player + 1;
                                     cmd_pos <= 0; // Reset for next player
@@ -2362,7 +2086,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 RX_PARSE_COININP: begin
-                    $display("[CONTROLLER][RX_PARSE_COININP] Parsing coin data, cmd_pos=%d, rx_byte=0x%02X, current_coin=%d", cmd_pos, com_rx_byte, current_coin);
                     if (com_rx_remaining > 0) begin
                         // Parse coin data (2 bytes per coin slot)
                         case (cmd_pos)
@@ -2370,7 +2093,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 // Format: [condition(2 bits) counter_MSB(6 bits)]
                                 temp_coin_condition <= com_rx_byte[7:6];  // Top 2 bits = condition
                                 temp_counter_msb <= com_rx_byte[5:0];     // Bottom 6 bits = counter MSB
-                                $display("[CONTROLLER] Coin slot %d: condition=%d, msb=0x%02X", current_coin, com_rx_byte[7:6], com_rx_byte[5:0]);
                                 return_state <= RX_PARSE_COININP;
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
@@ -2387,13 +2109,9 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     3: coin4 <= (temp_coin_condition == 2'b10);
                                 endcase
                                 
-                                $display("[CONTROLLER] Coin slot %d: lsb=0x%02X, total=%d, increase=%b", 
-                                        current_coin, com_rx_byte, {temp_counter_msb, com_rx_byte}, (temp_coin_condition == 2'b10));
-                                
                                 // Check if we need to parse the next coin slot
                                 if (current_coin >= (jvs_nodes_r.node_coin_slots[current_device_addr - 1] - 1)) begin
                                     // Coin parsing complete, advance to next command
-                                    $display("[CONTROLLER] Coin parsing complete, advancing to next command");
                                     cmd_pos <= 0;
                                     com_src_cmd_next <= 1'b1;
                                     return_state <= RX_PARSE_INPUT_CMD;
@@ -2419,18 +2137,15 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 RX_PARSE_ANLINP: begin
-                    $display("[CONTROLLER][RX_PARSE_ANLINP] Parsing analog data, cmd_pos=%d, rx_byte=0x%02X", cmd_pos, com_rx_byte);
                     return_state <= RX_PARSE_ANLINP;
                     if (com_rx_remaining > 0) begin
                         case (cmd_pos)
                             3'd0: begin
                                 // Check REPORT byte
                                 if (com_rx_byte == REPORT_NORMAL) begin
-                                    $display("[CONTROLLER][RX_PARSE_ANLINP] Report Normal");
                                     com_rx_next <= 1'b1;
                                     main_state <= STATE_RX_NEXT;
                                 end else begin
-                                    $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for ANLINP", com_rx_byte);
                                     com_src_cmd_next <= 1'b1;
                                     return_state <= RX_PARSE_INPUT_CMD;
                                     main_state <= STATE_RX_NEXT;
@@ -2455,7 +2170,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         else if (channel_idx == 5) screen_pos_y[15:8] <= com_rx_byte;
                                     end
                                 endcase
-                                $display("[CONTROLLER] Analog channel %d high byte: 0x%02X", channel_idx, com_rx_byte);
                             end else begin
                                 // Low byte
                                 case (channel_idx)
@@ -2469,13 +2183,11 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         else if (channel_idx == 5) screen_pos_y[7:0] <= com_rx_byte;
                                     end
                                 endcase
-                                $display("[CONTROLLER] Analog channel %d low byte: 0x%02X", channel_idx, com_rx_byte);
                             end
                                     main_state <= STATE_RX_NEXT;
                                     com_rx_next <= 1'b1;
                                 end else begin
                                     // Analog parsing complete, check if more commands or return to polling
-                                    $display("[CONTROLLER] Analog parsing complete, checking for more commands");
                                     cmd_pos <= 0;
                                     com_src_cmd_next <= 1'b1; // Advance to next command in FIFO
                                     return_state <= RX_PARSE_INPUT_CMD;
@@ -2493,18 +2205,15 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // ADDITIONAL INPUT PARSING STATES - Not yet implemented
                 //-------------------------------------------------------------
                 RX_PARSE_ROTINP: begin
-                    $display("[CONTROLLER][RX_PARSE_ROTINP] Parsing rotary data - pas encore implémenté");
                     return_state <= RX_PARSE_ROTINP;
                     if (com_rx_remaining > 0) begin
                         case (cmd_pos)
                             3'd0: begin
                                 // Check REPORT byte
                                 if (com_rx_byte == REPORT_NORMAL) begin
-                                    $display("[CONTROLLER][RX_PARSE_ROTINP] Report Normal");
                                     com_rx_next <= 1'b1;
                                     main_state <= STATE_RX_NEXT;
                                 end else begin
-                                    $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for ROTINP", com_rx_byte);
                                     com_src_cmd_next <= 1'b1;
                                     return_state <= RX_PARSE_INPUT_CMD;
                                     main_state <= STATE_RX_NEXT;
@@ -2513,7 +2222,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             end
                             default: begin
                                 // Parse rotary data - not yet implemented
-                                $display("[CONTROLLER] Skipping rotary byte: 0x%02X", com_rx_byte);
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end
@@ -2527,18 +2235,15 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 RX_PARSE_KEYINP: begin
-                    $display("[CONTROLLER][RX_PARSE_KEYINP] Parsing keycode data - pas encore implémenté");
                     return_state <= RX_PARSE_KEYINP;
                     if (com_rx_remaining > 0) begin
                         case (cmd_pos)
                             3'd0: begin
                                 // Check REPORT byte
                                 if (com_rx_byte == REPORT_NORMAL) begin
-                                    $display("[CONTROLLER][RX_PARSE_KEYINP] Report Normal");
                                     com_rx_next <= 1'b1;
                                     main_state <= STATE_RX_NEXT;
                                 end else begin
-                                    $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for KEYINP", com_rx_byte);
                                     com_src_cmd_next <= 1'b1;
                                     return_state <= RX_PARSE_INPUT_CMD;
                                     main_state <= STATE_RX_NEXT;
@@ -2547,7 +2252,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             end
                             default: begin
                                 // Parse keycode data - not yet implemented
-                                $display("[CONTROLLER] Skipping keycode byte: 0x%02X", com_rx_byte);
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end
@@ -2561,7 +2265,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 RX_PARSE_SCRPOSINP: begin
-                    $display("[CONTROLLER][RX_PARSE_SCRPOSINP] Parsing screen position data, cmd_pos=%d, rx_byte=0x%02X", cmd_pos, com_rx_byte);
                     return_state <= RX_PARSE_SCRPOSINP;
                     if (com_rx_remaining > 0) begin
                         // Parse screen position data (4 bytes: X_HIGH, X_LOW, Y_HIGH, Y_LOW)
@@ -2570,26 +2273,21 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                         case (data_pos)
                             8'd0: begin // X coordinate high byte
                                 screen_pos_x[15:8] <= com_rx_byte;
-                                $display("[CONTROLLER] Screen X high byte: 0x%02X", com_rx_byte);
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end
                             8'd1: begin // X coordinate low byte
                                 screen_pos_x[7:0] <= com_rx_byte;
-                                $display("[CONTROLLER] Screen X low byte: 0x%02X, X = %d", com_rx_byte, {screen_pos_x[15:8], com_rx_byte});
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end
                             8'd2: begin // Y coordinate high byte
                                 screen_pos_y[15:8] <= com_rx_byte;
-                                $display("[CONTROLLER] Screen Y high byte: 0x%02X", com_rx_byte);
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end
                             8'd3: begin // Y coordinate low byte
                                 screen_pos_y[7:0] <= com_rx_byte;
-                                $display("[CONTROLLER] Screen Y low byte: 0x%02X, Y = %d", com_rx_byte, {screen_pos_y[15:8], com_rx_byte});
-                                $display("[CONTROLLER] Screen position complete: (%d, %d)", {screen_pos_x[15:8], screen_pos_x[7:0]}, {screen_pos_y[15:8], com_rx_byte});
                                 // Screen position parsing complete, advance to next command
                                 cmd_pos <= 0;
                                 com_src_cmd_next <= 1'b1;
@@ -2599,7 +2297,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             end
                             default: begin
                                 // Unexpected data, skip
-                                $display("[CONTROLLER] Unexpected SCRPOSINP data at pos %d: 0x%02X", data_pos, com_rx_byte);
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end
@@ -2615,18 +2312,15 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 RX_PARSE_MISCSWINP: begin
-                    $display("[CONTROLLER][RX_PARSE_MISCSWINP] Parsing misc digital data - pas encore implémenté");
                     return_state <= RX_PARSE_MISCSWINP;
                     if (com_rx_remaining > 0) begin
                         case (cmd_pos)
                             3'd0: begin
                                 // Check REPORT byte
                                 if (com_rx_byte == REPORT_NORMAL) begin
-                                    $display("[CONTROLLER][RX_PARSE_MISCSWINP] Report Normal");
                                     com_rx_next <= 1'b1;
                                     main_state <= STATE_RX_NEXT;
                                 end else begin
-                                    $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for MISCSWINP", com_rx_byte);
                                     com_src_cmd_next <= 1'b1;
                                     return_state <= RX_PARSE_INPUT_CMD;
                                     main_state <= STATE_RX_NEXT;
@@ -2635,7 +2329,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             end
                             default: begin
                                 // Parse misc digital data - not yet implemented
-                                $display("[CONTROLLER] Skipping misc digital byte: 0x%02X", com_rx_byte);
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end
@@ -2649,18 +2342,15 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 RX_PARSE_OUTPUT1: begin
-                    $display("[CONTROLLER][RX_PARSE_OUTPUT1] Parsing output digital response - pas encore implémenté");
                     return_state <= RX_PARSE_OUTPUT1;
                     if (com_rx_remaining > 0) begin
                         case (cmd_pos)
                             3'd0: begin
                                 // Check REPORT byte
                                 if (com_rx_byte == REPORT_NORMAL) begin
-                                    $display("[CONTROLLER][RX_PARSE_OUTPUT1] Report Normal");
                                     com_rx_next <= 1'b1;
                                     main_state <= STATE_RX_NEXT;
                                 end else begin
-                                    $display("[CONTROLLER] ERROR: Bad REPORT 0x%02X for OUTPUT1", com_rx_byte);
                                     com_src_cmd_next <= 1'b1;
                                     return_state <= RX_PARSE_INPUT_CMD;
                                     main_state <= STATE_RX_NEXT;
@@ -2669,7 +2359,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             end
                             default: begin
                                 // Parse output digital response - not yet implemented
-                                $display("[CONTROLLER] Skipping output digital byte: 0x%02X", com_rx_byte);
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end
@@ -2689,8 +2378,8 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     if (com_rx_complete_negedge) begin
                         // Check STATUS byte decoded by jvs_com from received frame
                         if (com_src_cmd_status == STATUS_NORMAL) begin
+                            timeout_counter <= 32'h0;
                             // STATUS OK, dispatch to appropriate parser
-                            $display("[CONTROLLER] PROCESSING 0x%02X with STATUS %02X", com_src_cmd, com_rx_byte);
                             cmd_pos <= 8'd0;
                             case (com_src_cmd)
                                 CMD_SETADDR: main_state <= RX_PARSE_SETADDR;
@@ -2703,7 +2392,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                             endcase
                         end else begin
                             // STATUS error, log and retry
-                            $display("[CONTROLLER] ERROR: Bad STATUS 0x%02X for cmd 0x%02X", com_src_cmd_status, com_src_cmd);
                             case (com_src_cmd)
                                 CMD_SETADDR: main_state <= STATE_FIRST_RESET;    // Critical - restart sequence
                                 CMD_IOIDENT: main_state <= STATE_SEND_IOIDENT;     // Retry ID read
@@ -2718,7 +2406,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end else if (timeout_counter < RX_TIMEOUT_COUNT) begin  // 10ms timeout - fast for responsive gaming
                         timeout_counter <= timeout_counter + 1;
                     end else begin
-                        $display("[CONTROLLER] RX_IDLE Timeout");
                         // Timeout handling - different strategies for different commands
                         case (com_src_cmd)
                             /*
@@ -2743,7 +2430,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end else begin
                         // Timer expired, return to caller state
                         main_state <= return_state;
-                        $display("[CONTROLLER] MAIN_TIMER_DELAY complete, returning to state 0x%02X", return_state);
                     end
                 end
 
@@ -2751,8 +2437,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // GENERIC TX NEXT STATE - Handles pulse cleanup and position increment
                 //-------------------------------------------------------------
                 STATE_TX_NEXT: begin
-                    $display("[CONTROLLER][STATE_TX_NEXT] cmd:%b data:%b commit:%b", com_tx_cmd_push, com_tx_data_push, com_commit);
-                    $display("[CONTROLLER] STATE_TX_NEXT: clearing com_tx_cmd_push and com_tx_data_push");
                     com_tx_cmd_push <= 1'b0;
                     com_tx_data_push <= 1'b0;
                     cmd_pos <= cmd_pos + 1;
@@ -2770,7 +2454,6 @@ module jvs_controller #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end
                 end
                 STATE_RX_NEXT: begin
-                    $display("[CONTROLLER][STATE_RX_NEXT]");
                     com_rx_next <= 0;
                     cmd_pos <= cmd_pos + 1;                    
                     main_state <= return_state;

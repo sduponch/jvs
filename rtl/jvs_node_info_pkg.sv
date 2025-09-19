@@ -6,6 +6,7 @@ package jvs_node_info_pkg;
   parameter int JVS_COIN_MAX    = 4;
 
 	typedef struct {
+		logic [7:0] node_count;
 		logic [7:0] node_id [0:MAX_JVS_NODES-1];           // Node ID (address)
 		logic [7:0] node_name [0:MAX_JVS_NODES-1][0:NODE_NAME_SIZE-1]; // Device name from IOIDENT command
 		logic [7:0] node_cmd_ver [0:MAX_JVS_NODES-1];      // Command version for each node
