@@ -98,34 +98,6 @@ jobs:
       id-token: write
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        repository: RndMnkIII/JVS_Debugger
-        ref: jvs_submodule
-        path: JVS_Debugger
-        submodules: 'recursive'
-
-    - name: Update JVS submodule to PR branch
-      run: |
-        cd JVS_Debugger/src/fpga/analogizer/jvs
-        git fetch origin
-        # Use the branch from the PR context, fallback to main for direct pushes
-        if [ "${{ github.event_name }}" = "pull_request" ]; then
-          BRANCH_REF="${{ github.head_ref }}"
-          echo "🔄 PR detected - using branch: $BRANCH_REF"
-          git checkout origin/$BRANCH_REF || {
-            echo "⚠️ Branch $BRANCH_REF not found, falling back to main"
-            git checkout origin/main
-          }
-        else
-          BRANCH_REF="${{ github.ref_name }}"
-          echo "📤 Push detected - using branch: $BRANCH_REF"
-          git checkout origin/$BRANCH_REF
-        fi
-        cd ../../../..
-        echo "✅ JVS submodule updated to branch: $BRANCH_REF"
-
     - name: Install dependencies
       run: |
         sudo apt-get update
@@ -135,12 +107,9 @@ jobs:
       uses: actions/cache@v4
       id: quartus-cache
       with:
-        path: |
-          ~/quartus
-          ~/downloadtmp
-        key: quartus-lite-24.1std-1077-${{ runner.os }}-cyclonev-modelsim
-        restore-keys: |
-          quartus-lite-24.1std-1077-${{ runner.os }}-
+        path: $HOME/quartus
+        key: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
+        restore-keys: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
 
     - name: Install Quartus Prime Lite
       if: steps.quartus-cache.outputs.cache-hit != 'true'
@@ -152,40 +121,84 @@ jobs:
         chmod +x qinst-lite-linux-24.1std-1077.run
 
         # Extract and install automatically
-        ./qinst-lite-linux-24.1std-1077.run --accept --quiet --nox11 --target $HOME/quartus_temp -- --cli --download-dir ~/downloadtmp --install-dir ~/quartus --accept-eula --components quartus,cyclonv
+        ./qinst-lite-linux-24.1std-1077.run -- --cli --accept-eula --components quartus,cyclonev,questa_fse --download-dir $HOME/quartustmp --install-dir $HOME/quartus
 
         # Installation should be done automatically by the extractor above
         echo "Installation completed by extractor"
 
-    - name: Setup Quartus environment
+    - name: Check cache usage
       run: |
         if [ "${{ steps.quartus-cache.outputs.cache-hit }}" == "true" ]; then
           echo "✅ Cache hit - Using cached Quartus installation"
         fi
 
-        # Find Quartus installation
-        find ~/quartus -name "quartus_sh" -type f 2>/dev/null || echo "quartus_sh not found in ~/quartus"
-        find $HOME -name "quartus_sh" -type f 2>/dev/null || echo "quartus_sh not found in HOME"
-
-        # Set environment variables for Quartus
-        echo "QUARTUS_ROOTDIR=$HOME/quartus/quartus" >> $GITHUB_ENV
+    - name: Setup ENV for Quartus
+      run: |
         echo "PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$PATH" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+        echo "QUARTUS_ROOTDIR=$HOME/quartus/quartus" >> $GITHUB_ENV
+
+    - name: Check quartus_sh
+      run: quartus_sh --version
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        repository: RndMnkIII/JVS_Debugger
+        ref: jvs_submodule
+        path: JVS_Debugger
+        submodules: 'recursive'
+
+    - name: Update JVS submodule to PR branch
+      run: |
+        cd JVS_Debugger/src/fpga/analogizer/jvs
+
+        echo "🔍 Current JVS submodule state:"
+        echo "Current commit: $(git rev-parse HEAD)"
+        echo "Current remote: $(git remote get-url origin)"
+
+        # Fetch all branches from the JVS remote
+        git fetch origin
+
+        echo "🔍 Available JVS remote branches:"
+        git branch -r
+
+        # Determine which JVS branch to use
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          JVS_BRANCH="${{ github.head_ref }}"
+          echo "🔄 JVS PR detected - using branch: $JVS_BRANCH"
+          echo "🔍 PR info: PR #${{ github.event.number }} from ${{ github.head_ref }} to ${{ github.base_ref }}"
+        else
+          JVS_BRANCH="${{ github.ref_name }}"
+          echo "📤 JVS push detected - using branch: $JVS_BRANCH"
+        fi
+
+        # Try to checkout the JVS branch in the submodule
+        if git show-ref --verify --quiet refs/remotes/origin/$JVS_BRANCH; then
+          git checkout origin/$JVS_BRANCH
+          echo "✅ Successfully checked out JVS origin/$JVS_BRANCH"
+        else
+          echo "⚠️ JVS branch origin/$JVS_BRANCH not found, trying to fetch it specifically"
+          git fetch origin $JVS_BRANCH:$JVS_BRANCH || {
+            echo "⚠️ Could not fetch JVS branch $JVS_BRANCH, falling back to main"
+            git checkout origin/main
+            JVS_BRANCH="main"
+          }
+          if [ "$JVS_BRANCH" != "main" ] && git show-ref --verify --quiet refs/heads/$JVS_BRANCH; then
+            git checkout $JVS_BRANCH
+            echo "✅ Successfully checked out JVS local branch $JVS_BRANCH"
+          fi
+        fi
+
+        echo "🔍 Final JVS submodule state:"
+        echo "Commit: $(git rev-parse HEAD)"
+        echo "Branch: $(git branch --show-current || echo 'detached HEAD')"
+
+        cd ../../../..
+        echo "✅ JVS submodule updated to branch: $JVS_BRANCH"
 
     - name: Compile JVS project
       run: |
-        # Set up environment
-        export LD_LIBRARY_PATH="$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib:$LD_LIBRARY_PATH"
-        export PATH="$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$PATH"
-        export QUARTUS_ROOTDIR="$HOME/quartus/quartus"
-
-        # Verify Quartus is working
-        echo "✅ Testing quartus_sh..."
-        echo "PATH: $PATH"
-        echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
-        ldd $HOME/quartus/quartus/linux64/quartus_sh | grep "not found" || echo "All libraries found"
-        quartus_sh --version || echo "Version check failed but continuing..."
-
         # Run compilation
         echo "🚀 Starting compilation..."
         cd JVS_Debugger/src/fpga
