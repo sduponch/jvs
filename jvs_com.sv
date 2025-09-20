@@ -23,7 +23,8 @@
 module jvs_com
 #(
     parameter MASTER_CLK_FREQ = 50_000_000,
-    parameter JVS_BUFFER_SIZE = 256  // Maximum JVS frame data size
+    parameter JVS_BUFFER_SIZE = 256,  // Maximum JVS frame data size
+    parameter CMD_FIFO_SIZE = 16      // Command FIFO depth (max commands per frame)
 )
 (
     // Clock and Reset
@@ -46,12 +47,12 @@ module jvs_com
     // High-level Protocol Interface - RX Path
     output reg [7:0]    rx_byte,       // Current data byte
     input  wire         rx_next,       // Pulse to get next byte
-    output reg [7:0]    rx_remaining,  // Bytes remaining (0 = current is last)
+    output reg [BUFFER_ADDR_BITS-1:0] rx_remaining, // Auto-sized bytes remaining counter
     output reg [7:0]    src_node,      // Source node of response
     output reg [7:0]    src_cmd,       // CMD from command FIFO
     output reg [7:0]    src_cmd_status, // STATUS byte decoded from JVS response
     input  wire         src_cmd_next,  // Pulse to get next command from FIFO
-    output reg [4:0]    src_cmd_count, // Number of commands available in FIFO
+    output reg [CMD_ADDR_BITS:0] src_cmd_count, // Auto-sized command count with overflow bit
     output reg          rx_complete,   // Pulse when frame complete
     output reg          rx_error,       // Checksum or format error
     input  wire         rx_processing_done, // Signal that RX processing is complete, ready for TX
@@ -70,6 +71,10 @@ module jvs_com
     
     // JVS Protocol Constants
     localparam JVS_CHECKSUM_SIZE = 1;      // Checksum is 1 byte
+
+    // Automatic sizing based on buffer parameters
+    localparam BUFFER_ADDR_BITS = $clog2(JVS_BUFFER_SIZE);  // Address bits for buffer indexing
+    localparam CMD_ADDR_BITS = $clog2(CMD_FIFO_SIZE);       // Address bits for command FIFO
     
     // TX State Machine
     localparam [3:0] TX_IDLE         = 4'h0;
@@ -122,34 +127,34 @@ module jvs_com
     reg [3:0]   tx_state;
     reg [3:0]   tx_next_state;      // État suivant après TX_TRANSMIT_BYTE
     reg [15:0]  tx_timer;
-    reg [7:0]   tx_data_idx;
+    reg [BUFFER_ADDR_BITS-1:0] tx_data_idx;  // Auto-sized for buffer indexing
     reg [7:0]   tx_checksum;
     reg         tx_escape_pending;
     reg [7:0]   tx_escape_byte;
-    
+
     // TX Data Buffer Management
-    reg [7:0]   tx_data_buffer [0:255]; // Buffer for pushed data
-    reg [7:0]   tx_data_count;          // Number of bytes in buffer
+    reg [7:0]   tx_data_buffer [0:JVS_BUFFER_SIZE-1]; // Buffer for pushed data (parameterized)
+    reg [BUFFER_ADDR_BITS-1:0] tx_data_count;         // Auto-sized byte counter
     reg [7:0]   tx_dst_node_latched;    // Latched destination node
     reg         tx_commit_pending;      // Commit pending processing
     
     // Command FIFO for multi-command frame tracking
-    reg [7:0]   cmd_fifo [0:15];        // FIFO to store commands (up to 16 commands per frame)
-    reg [3:0]   cmd_write_ptr;          // Write pointer for command FIFO
-    reg [3:0]   cmd_read_ptr;           // Read pointer for command FIFO  
-    reg [4:0]   cmd_count;              // Number of commands in FIFO (5-bit for overflow detection)
+    reg [7:0]   cmd_fifo [0:CMD_FIFO_SIZE-1];          // FIFO to store commands (parameterized)
+    reg [CMD_ADDR_BITS-1:0] cmd_write_ptr;             // Auto-sized write pointer
+    reg [CMD_ADDR_BITS-1:0] cmd_read_ptr;              // Auto-sized read pointer
+    reg [CMD_ADDR_BITS:0]   cmd_count;                 // Auto-sized counter with overflow bit
     reg         cmd_fifo_init;          // Pulse to initialize command FIFO reading
     
     // RX State Machine
     reg [3:0]   rx_state;
-    reg [7:0]   rx_data_idx;
+    reg [BUFFER_ADDR_BITS-1:0] rx_data_idx;           // Auto-sized for buffer indexing
     reg [7:0]   rx_checksum_calc;
     reg [7:0]   rx_checksum_recv;
     reg         rx_escape_mode;
     reg [7:0]   rx_byte_buffer;
-    reg [7:0]   rx_length_internal; // Internal length storage
-    reg [7:0]   rx_buffer [0:255];  // Internal RX data buffer
-    reg [7:0]   rx_read_idx;        // Current read index for rx_next interface
+    reg [BUFFER_ADDR_BITS-1:0] rx_length_internal;    // Auto-sized length storage
+    reg [7:0]   rx_buffer [0:JVS_BUFFER_SIZE-1];      // Internal RX data buffer (parameterized)
+    reg [BUFFER_ADDR_BITS-1:0] rx_read_idx;           // Auto-sized read index
     reg         rx_complete_pulse;  // One-cycle pulse for rx_complete
     
     // Internal frame buffers
