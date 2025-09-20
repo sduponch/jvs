@@ -1,4 +1,4 @@
-# JVS Protocol Implementation
+# JVSCore: FPGA JVS Host Protocol Implementation
 
 [![Build Status](https://github.com/sduponch/jvs/actions/workflows/quartus-build.yml/badge.svg)](https://github.com/sduponch/jvs/actions/workflows/quartus-build.yml)
 [![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-Live-brightgreen)](https://sduponch.github.io/jvs/)
@@ -7,22 +7,61 @@
 
 > **🌐 [Latest Build Available](https://sduponch.github.io/jvs/)** - Automatic builds with FPGA statistics and direct downloads!
 
-This repository contains a JVS (JAMMA Video Standard) Master controller implementation for FPGA platforms, designed for connecting JVS arcade cabinets through RS485 communication.
+## What is JVS?
 
-## 🚧 Work In Progress - Getting Latest Build
+**JVS (JAMMA Video Standard)** is a digital communication protocol used in modern arcade systems to connect I/O boards (buttons, joysticks, coin mechanisms) to the main game board via RS485. It replaced the analog JAMMA standard with a more reliable digital interface supporting:
 
-### 🌍 Public Downloads (No GitHub Account Required)
+- **Multi-device chaining** - Up to 31 I/O boards on one bus
+- **Digital communication** - No signal degradation or noise issues
+- **Advanced features** - Analog inputs, coin counters, LED control, displays
+- **Standardized protocol** - Universal compatibility across manufacturers
 
-**📥 [Download Latest Build](https://sduponch.github.io/jvs/)** - Direct download, always up-to-date!
+## Why This Project?
+
+**Play your arcade cores on real arcade cabinets without modifications!**
+
+This project enables you to:
+- **Connect Analogue Pocket to JVS arcade cabinets** - Use real arcade controls
+- **Preserve original hardware** - No cabinet modifications required
+- **Universal compatibility** - Works with various JVS I/O boards
+- **Native FPGA implementation** - No microcontroller needed for input emulation
+- **Cost-effective solution** - Reliable and affordable JVS-to-JAMMA conversion interfaces available
+- **Analog and digital output support** - Control LEDs, solenoids, motors, and other cabinet features
+- **Light gun and IR support made easy** - Direct screen position input handling for shooting games
+- **Future MiSTer support** - Expandable to other FPGA platforms
+- **Plug-and-play experience** - Just connect and enjoy
+
+## Hardware Requirements
+
+### Essential Hardware
+- **Analogue Pocket** - FPGA handheld console
+- **Analogizer Extension** - FPGA expansion board ([RndMnkIII's Analogizer](https://github.com/RndMnkIII/Analogizer))
+- **SNAC JVS Adapter** - Physical JVS connector interface (comming soon)
+
+### JVS Cabinet Setup
+- **JVS-compatible arcade cabinet** - Most modern arcade machines (post-1995)
+- **JVS cable connection** - USB-like JVS cable or JVS adapter (e.g., Time Crisis 2 setup)
+- **USB-C power supply** - Power for Analogizer (5V DC recommended)
+
+This repository contains a complete JVS (JAMMA Video Standard) Master controller implementation for FPGA platforms, designed for connecting JVS arcade cabinets through RS485 communication.
+
+## Work In Progress - Getting Latest Build
+
+A test core has been developed in collaboration with **@RndMnkIII**. You can download the latest version on this page:
+
+### Public Downloads (No GitHub Account Required)
+
+**[Download Latest Build](https://sduponch.github.io/jvs/)** - Direct download, always up-to-date!
 
 ### Alternative (GitHub Account Required)
 **📥 [GitHub Actions](https://github.com/sduponch/jvs/actions/workflows/quartus-build.yml?query=branch%3Amain+is%3Asuccess)** - Download `jvs-debugger-outputs` artifact
 
 ### Installation Steps:
-1. **Download** the latest build from the link above
-2. **Extract** all files from the ZIP/folder
-3. **Copy** the `Cores/` folder to your Analog Pocket SD card root
-4. **Enjoy** - The core will appear in `Cores/RndMnkIII.JVS_Debugger/`
+1. **Pre-configure your Analog Pocket** with [AnalogizerConfigurator](https://github.com/RndMnkIII/AnalogizerConfigurator)
+2. **Download** the latest build from the link above
+3. **Extract** all files from the ZIP/folder
+4. **Copy** the folders to your Analog Pocket SD card root
+5. **Enjoy** - The core will appear in `Cores/RndMnkIII.JVS_Debugger/`
 
 ### What You Get:
 - ✅ **Ready-to-use Analog Pocket core** in correct folder structure
@@ -36,23 +75,22 @@ This module implements a JVS (JAMMA Video Standard) Master controller that allow
 
 The JVS protocol implementation is organized in a modular architecture:
 
-- **RTL Layer** (`rtl/`) - Base packages and definitions
-- **Communication Layer** (`jvscom/`) - Low-level UART and frame handling  
-- **Protocol Layer** - High-level JVS command processing
+- **RTL Layer** (`rtl/`) - Packages and definitions
+- **Communication Layer** (`jvs_com.sv`) - Low-level UART and frame handling
+- **Protocol Layer** (`jvs_ctrl.sv`) - High-level JVS command processing
 
 ## Architecture
 
 ```
 jvs/
-├── rtl/                    # RTL definitions
-│   ├── JVS_pkg.sv         # Base JVS package
+├── rtl/                    # RTL definitions and packages
+│   ├── jvs_defs_pkg.sv    # JVS constants and command definitions
 │   └── jvs_node_info_pkg.sv # Node information structures
-├── jvscom/                # Communication layer
-│   ├── jvs_com.sv         # Frame encapsulation/decapsulation
-│   ├── uart_rx.v          # UART receiver
-│   └── uart_tx.v          # UART transmitter
-├── jvs_controller.sv      # Main JVS protocol controller
-└── jvs.qip               # Quartus project file
+├── jvs_com.sv            # Communication layer (UART + framing)
+├── jvs_ctrl.sv           # Protocol layer (JVS state machine)
+├── uart_tx.v             # UART transmitter
+├── uart_rx.v             # UART receiver
+└── jvs.qip              # Quartus IP Project
 ```
 
 ## Implementation Status
@@ -60,7 +98,7 @@ jvs/
 **ALPHA Version** - Partial implementation (~30-40% of JVS v3.0 specification)  
 Based on JVS Specification v3.0 (25 pages, 49 commands total)
 
-### ✅ Fully Implemented (8/49 commands)
+### ✅ Fully Implemented (10/49 commands)
 - **Reset (F0)** - Double reset sequence with timing delays
 - **Set Address (F1)** - Single device addressing
 - **IO Identity (10)** - Device name string reading (up to 100 chars)
@@ -68,14 +106,14 @@ Based on JVS Specification v3.0 (25 pages, 49 commands total)
 - **JVS Revision (12)** - Protocol version detection (BCD)
 - **Communications Version (13)** - Communication system version
 - **Feature Check (14)** - Complete capability parsing with all function codes
-- **Switch Inputs (20)** - Digital buttons (2 players, 13 buttons each)
-- **Analog Inputs (22)** - Multi-channel 16-bit analog data
-- **Generic Output 1 (32)** - Digital GPIO control (3-byte format)
-- **JVS escape sequences** - D0 DF → E0, D0 CF → D0
+- **Switch Inputs (20)** - Digital buttons (Up to 2 players)
+- **Coin Inputs (21)** - Multi-slot coin counter parsing (14-bit counters + condition status)
+- **Analog Inputs (22)** - Multi-channel 16-bit analog data with proper channel parsing
+- **Generic Output 1 (32)** - Digital GPIO control (3-byte format for Time Crisis 4 recoil)
+- **JVS escape sequences** - D0 DF → E0, D0 CF → D0 (Untested)
 - **RS485 timing control** - Setup/hold delays
 
-### 🟡 Partially Implemented (4/49 commands)
-- **Coin Inputs (21)** - Command sent, status parsed but coin data ignored
+### 🟡 Partially Implemented (2/49 commands)
 - **Screen Position Inputs (25)** - Basic X/Y coordinates (16-bit each)
 - **Keycode Inputs (24)** - Command sent, response skipped
 - **Misc Switch Inputs (26)** - Command sent, response skipped
@@ -106,55 +144,18 @@ Based on JVS Specification v3.0 (25 pages, 49 commands total)
 ## Architecture Details
 
 ### Modular Architecture (Refactored)
-- **jvs_com module** - Low-level communication layer with UART/RS485/framing
-- **jvs_controller module** - High-level JVS protocol state machine
-- **Command FIFO system** - Supports chained commands (e.g., SWINP+COININP+ANLINP)
-- **Sequential API interface** - Optimized TX/RX with 25 signals vs 2048 array-based
+- **jvs_com module** - Low-level communication layer with UART/RS485/framing with **Command FIFO system** to supports chained commands (e.g., SWINP+COININP+ANLINP)
+- **jvs_ctrl module** - High-level JVS protocol state machine and data parsing (will be moved to specialised module)
 - **Node information management** - Device capabilities tracking
+- **SystemVerilog packages** - Modern constant definitions with jvs_defs_pkg
 
 ### Protocol Compliance
 - **Physical Layer**: RS-485 at 115200 baud (8N1) ✅
-- **Link Layer**: SYNC(0xE0) + NODE + LENGTH + DATA + CHECKSUM ✅
-- **Escape sequences**: D0 DF → E0, D0 CF → D0 ✅
-- **Address assignment**: Master=0x00, Slaves=0x01-0x1F ✅
+- **Link Layer**: SYNC(0xE0) + NODE + LENGTH + DATA + CHECKSUM ✅ (provided by jvscom)
+- **Escape sequences**: D0 DF → E0, D0 CF → D0 ✅ (untested)
+- **Address assignment**: Master=0x00, Slaves=0x01-0x1F ✅ (infrastructure ready)
 - **Initialization**: Double reset + sequential addressing ✅
 - **Multi-device chaining**: Infrastructure present but single device only
-
-### Hardware Requirements
-- **External MAX485** or equivalent RS485 transceiver
-- **Proper 120Ω termination** for reliable communication
-- **JVS-compatible arcade cabinet**
-- **SENSE line connection** for proper device chaining (unused in single mode)
-
-## Technical Features
-
-- **RS485 Communication** with proper timing (10μs setup, 30μs hold)
-- **Escape Sequence Handling** (D0 DF → E0, D0 CF → D0)
-- **Frame Validation** with checksum verification
-- **Multi-node Support** (up to 8 devices)
-- **Configurable UART** baud rates
-
-## Modular Architecture Details
-
-### jvs_com Module (Communication Layer)
-- **UART TX/RX** with configurable baud rates and proper RS485 timing
-- **Frame encapsulation/decapsulation** with checksum validation
-- **Escape sequence processing** (D0 DF → E0, D0 CF → D0) automatically
-- **Command FIFO tracking** for chained command responses
-- **Sequential API interface** with tx_data_push/tx_cmd_push and rx_byte/rx_next
-
-### jvs_controller Module (Protocol Layer)  
-- **JVS protocol state machine** - Initialization sequence and command handling
-- **Device capability parsing** - Feature detection and node information storage
-- **Input/output data processing** - Button, analog, coin, and screen position data
-- **Chained command support** - Single frame with multiple commands (SWINP+COININP+ANLINP)
-- **SNAC interface compatibility** - Direct integration with Analogue Pocket SNAC
-
-### Interface Benefits
-- **25 signals vs 2048** - Massive interconnect reduction compared to array-based design
-- **DMA-like transfers** - Sequential byte reading with rx_remaining counter
-- **Command tracking** - src_cmd_count and src_cmd_next for robust parsing
-- **Portability ready** - Clean separation for MiSTer and other FPGA platforms
 
 ## API Interface Examples
 
@@ -217,12 +218,24 @@ Include in your Quartus project:
 set_global_assignment -name QIP_FILE [file join $::quartus(qip_path) jvs/jvs.qip]
 ```
 
-## Simulation Support
+## 🚀 Roadmap & Future Improvements
 
-Use the following macro for simulation without JVS device:
-```tcl
-set_global_assignment -name VERILOG_MACRO "USE_DUMMY_JVS_DATA=1"
-```
+### Architecture Enhancements
+- **🔗 Chained I/O Board Support** - Full multi-device addressing (up to 31 devices)
+- **📦 Split jvs_ctrl Module** - Create dedicated `jvs_cmd.sv` for I/O command parsing
+- **⏰ NCO Clock Generation** - Numerically Controlled Oscillator for precise UART timing
+- **⚡ FPGA Resource Optimization** - Reduce logic utilization and improve timing
+
+### Protocol Completeness
+- **🔧 Error Recovery** - Checksum error handling and retransmission
+- **⏱️ Timeout Management** - Device response timeouts and recovery mechanisms
+- **🪙 Advanced Coin Management** - COINDEC, COININC, PAYINC, PAYDEC commands
+- **🎮 Extended I/O Support** - Rotary encoders, screen position, keycode inputs
+- **📺 Display Output** - Character display control (CHAROUT)
+
+### Performance & Compatibility
+- **🏭 Multi-platform Support** - MiSTer, DE10-Nano adaptations
+- **📡 Dynamic Baud Rate** - Runtime communication speed changes
 
 ## Author
 
