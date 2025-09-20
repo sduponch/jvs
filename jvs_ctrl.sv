@@ -104,9 +104,12 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
 
     // Name copying variables for device identification parsing
     logic [7:0] copy_write_idx;         // Write index for name copying
-   
+
     logic [3:0] current_player;
     logic [7:0] current_channel;
+
+    // Analog parsing variables - simplified
+    logic [7:0] temp_high_byte;     // Temporary storage for high byte
     //=========================================================================
     // JVS COMMUNICATION MODULE INSTANCE
     //=========================================================================
@@ -2141,65 +2144,79 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 RX_PARSE_ANLINP: begin
                     return_state <= RX_PARSE_ANLINP;
                     if (com_rx_remaining > 0) begin
-                        case (cmd_pos)
-                            3'd0: begin
-                                // Check REPORT byte
-                                if (com_rx_byte == REPORT_NORMAL) begin
-                                    com_rx_next <= 1'b1;
-                                    main_state <= STATE_RX_NEXT;
-                                end else begin
-                                    com_src_cmd_next <= 1'b1;
-                                    return_state <= RX_PARSE_INPUT_CMD;
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
-                                end
-                            end
-                            default: begin
-                                // Parse analog input data based on node configuration
-                                automatic logic [7:0] data_pos = cmd_pos - 1; // Adjust for REPORT byte
-                                if (data_pos < (jvs_nodes_r.node_analog_channels[current_device_addr - 1] * 2)) begin // 2 bytes per channel
-                                    automatic logic [3:0] channel_idx = data_pos / 2;
-                                    if (data_pos % 2 == 0) begin
-                                // High byte
-                                case (channel_idx)
-                                    0: p1_joy_state[31:24] <= com_rx_byte;  // P1 X axis high
-                                    1: p1_joy_state[15:8] <= com_rx_byte;   // P1 Y axis high
-                                    2: p2_joy_state[31:24] <= com_rx_byte;  // P2 X axis high
-                                    3: p2_joy_state[15:8] <= com_rx_byte;   // P2 Y axis high
-                                    default: begin
-                                        // Store in screen position for channels > 3
-                                        if (channel_idx == 4) screen_pos_x[15:8] <= com_rx_byte;
-                                        else if (channel_idx == 5) screen_pos_y[15:8] <= com_rx_byte;
-                                    end
-                                endcase
+                        // Variables already initialized in STATE_WAIT_RX
+                        // Parse analog data sequentially using cmd_pos (like feature check)
+                        if (current_channel < jvs_nodes_r.node_analog_channels[current_device_addr - 1]) begin
+                            if (cmd_pos % 2 == 1) begin
+                                // High byte - store temporarily (cmd_pos starts at 1, so odd = high byte)
+                                temp_high_byte <= com_rx_byte;
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
                             end else begin
-                                // Low byte
-                                case (channel_idx)
-                                    0: p1_joy_state[23:16] <= com_rx_byte;  // P1 X axis low
-                                    1: p1_joy_state[7:0] <= com_rx_byte;    // P1 Y axis low
-                                    2: p2_joy_state[23:16] <= com_rx_byte;  // P2 X axis low
-                                    3: p2_joy_state[7:0] <= com_rx_byte;    // P2 Y axis low
-                                    default: begin
-                                        // Store in screen position for channels > 3
-                                        if (channel_idx == 4) screen_pos_x[7:0] <= com_rx_byte;
-                                        else if (channel_idx == 5) screen_pos_y[7:0] <= com_rx_byte;
+                                // Low byte - combine and store final values (cmd_pos even = low byte)
+                                case (current_channel)
+                                    4'd0: begin // Channel 1 - P1 X axis
+                                        if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
+                                            p1_joy_state[31:20] <= ~{temp_high_byte, com_rx_byte[7:4]};
+                                        end else begin
+                                            p1_joy_state[31:24] <= temp_high_byte;
+                                            p1_joy_state[23:16] <= com_rx_byte;
+                                        end
                                     end
+                                    4'd1: begin // Channel 2 - P1 Y axis
+                                        if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
+                                            p1_joy_state[15:4] <= {temp_high_byte, com_rx_byte[7:4]};
+                                        end else begin
+                                            p1_joy_state[15:8] <= temp_high_byte;
+                                            p1_joy_state[7:0] <= com_rx_byte;
+                                        end
+                                    end
+                                    4'd2: begin // Channel 3 - P2 X axis or screen X for 1 player
+                                        if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
+                                            screen_pos_x <= {temp_high_byte, com_rx_byte};
+                                        end else begin
+                                            p2_joy_state[31:24] <= temp_high_byte;
+                                            p2_joy_state[23:16] <= com_rx_byte;
+                                        end
+                                    end
+                                    4'd3: begin // Channel 4 - P2 Y axis or screen Y for 1 player
+                                        if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
+                                            screen_pos_y <= {temp_high_byte, com_rx_byte};
+                                        end else begin
+                                            p2_joy_state[15:8] <= temp_high_byte;
+                                            p2_joy_state[7:0] <= com_rx_byte;
+                                        end
+                                    end
+                                    4'd4: begin // Channel 5 - Screen X
+                                        screen_pos_x <= {temp_high_byte, com_rx_byte};
+                                    end
+                                    4'd5: begin // Channel 6 - Screen Y
+                                        screen_pos_y <= {temp_high_byte, com_rx_byte};
+                                    end
+                                    default: ; // Additional channels
                                 endcase
+                                // Channel processing complete, advance to next channel
+                                current_channel <= current_channel + 1;
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
                             end
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
-                                end else begin
-                                    // Analog parsing complete, check if more commands or return to polling
-                                    cmd_pos <= 0;
-                                    com_src_cmd_next <= 1'b1; // Advance to next command in FIFO
-                                    return_state <= RX_PARSE_INPUT_CMD;
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
-                                end
-                            end
-                        endcase
+                        end else begin
+                            // All channels processed
+                            cmd_pos <= 0;
+                            current_channel <= 0;
+                            com_src_cmd_next <= 1'b1;
+                            return_state <= RX_PARSE_INPUT_CMD;
+                            main_state <= STATE_RX_NEXT;
+                            com_rx_next <= 1'b1;
+                        end
                     end else begin
-                        main_state <= STATE_IDLE;
+                        // No more data
+                        cmd_pos <= 0;
+                        current_channel <= 0;
+                        com_src_cmd_next <= 1'b1;
+                        return_state <= RX_PARSE_INPUT_CMD;
+                        main_state <= STATE_RX_NEXT;
+                        com_rx_next <= 1'b1;
                     end
                 end
 
@@ -2390,6 +2407,13 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 CMD_JVSREV: main_state <= RX_PARSE_JVSREV;
                                 CMD_COMMVER: main_state <= RX_PARSE_COMMVER;
                                 CMD_FEATCHK: main_state <= RX_PARSE_FEATURES;
+                                CMD_ANLINP: begin
+                                    // Initialize analog parsing variables
+                                    p1_joy_state <= 32'h00000000;
+                                    current_channel <= 4'd0;
+                                    cmd_pos <= 1; // Initialize to 1 for generic parsing (STATE_RX_NEXT returns to 1, not 0)
+                                    main_state <= RX_PARSE_ANLINP;
+                                end
                                 default: main_state <= RX_PARSE_INPUT_CMD; // For other commands, use unified parser
                             endcase
                         end else begin
