@@ -107,7 +107,7 @@ jobs:
       uses: actions/cache@v4
       id: quartus-cache
       with:
-        path: $HOME/quartus
+        path: quartus
         key: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
         restore-keys: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
 
@@ -125,6 +125,13 @@ jobs:
 
         # Installation should be done automatically by the extractor above
         echo "Installation completed by extractor"
+
+    - name: Force cache save after installation
+      if: steps.quartus-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: quartus
+        key: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
 
     - name: Check cache usage
       run: |
