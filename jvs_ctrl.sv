@@ -489,9 +489,11 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     logic [31:0] poll_timer;       // Timer for input polling frequency
 
     logic [7:0] current_device_addr; // Address assigned to JVS device (usually 0x01)
+    logic polling_mode;            // Flag indicating we're in polling mode (after full initialization)
+
     // Temporary variables for parsing
-    logic [7:0] current_func_code; // Store current function being parsed  
-    logic [3:0] current_coin;      // Current coin slot being parsed (0-3)   
+    logic [7:0] current_func_code; // Store current function being parsed
+    logic [3:0] current_coin;      // Current coin slot being parsed (0-3)
     logic [1:0] temp_coin_condition;
     logic [5:0] temp_counter_msb;
 
@@ -616,6 +618,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
 
             jvs_nodes_r.node_count <= 8'h00;
             current_device_addr <= 8'h01;    // Standard JVS device address
+            polling_mode <= 1'b0;             // Start in initialization mode
             // Initialize JVS node information (single node only)
             jvs_nodes_r.node_id[0] <= 8'h01;
             jvs_nodes_r.node_cmd_ver[0] <= 8'h00;
@@ -1236,6 +1239,9 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 //-------------------------------------------------------------
                 STATE_SEND_INPUTS: begin
                     // Send input commands using new jvs_com interface
+                    // Mark that we're now in polling mode (initialization complete)
+                    polling_mode <= 1'b1;
+
                     if (com_tx_ready) begin
                         // Set destination node
                         com_dst_node <= current_device_addr; // 01
@@ -1603,7 +1609,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
 
                 RX_PARSE_INPUT_CMD: begin
                     // Check if there are commands in the FIFO
-                    if (com_src_cmd_count > 0 && com_rx_remaining > 0) begin
+                    if (com_rx_remaining > 0) begin
                         // Parse based on current command in FIFO
                         case (com_src_cmd)
                             CMD_SETADDR: begin
@@ -1798,7 +1804,8 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         end
                                     end
                                     3'd1: begin
-                                        // Dispatch to specialized ANLINP state
+                                        // Dispatch to specialized COININP state
+                                        current_coin <= 0; // Initialize coin counter for parsing
                                         return_state <= RX_PARSE_COININP;
                                         main_state <= RX_PARSE_COININP;
                                     end
@@ -1822,7 +1829,8 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     end
                                     3'd1: begin
                                         // Dispatch to specialized ANLINP state
-                                        cmd_pos <= 0;
+                                        cmd_pos <= 1; // Start at cmd_pos=1 for first analog byte
+                                        current_channel <= 0; // Initialize channel counter
                                         return_state <= RX_PARSE_ANLINP;
                                         main_state <= RX_PARSE_ANLINP;
                                     end
@@ -1972,12 +1980,19 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                             end
                         endcase
                     end else begin
-                        // No more commands, input parsing complete
-                        jvs_data_ready_joy <= 1'b1; // Signal that input data is ready for gaming
-                        // Add delay between polling cycles to avoid overwhelming the bus
-                        delay_counter <= POLLING_INTERVAL_DELAY;
-                        return_state <= STATE_SEND_INPUTS;
-                        main_state <= STATE_MAIN_TIMER_DELAY;
+                        // No more commands to process
+                        if (polling_mode) begin
+                            // We're in polling mode - return to input polling
+                            jvs_data_ready_joy <= 1'b1; // Signal that input data is ready for gaming
+                            // Add delay between polling cycles to avoid overwhelming the bus
+                            delay_counter <= POLLING_INTERVAL_DELAY;
+                            return_state <= STATE_SEND_INPUTS;
+                            main_state <= STATE_MAIN_TIMER_DELAY;
+                        end else begin
+                            // Still in initialization mode - continue init sequence
+                            // This should not happen normally as init commands should continue the sequence
+                            main_state <= STATE_FATAL_ERROR;
+                        end
                     end
                 end
                 
@@ -2144,16 +2159,15 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 RX_PARSE_ANLINP: begin
                     return_state <= RX_PARSE_ANLINP;
                     if (com_rx_remaining > 0) begin
-                        // Variables already initialized in STATE_WAIT_RX
-                        // Parse analog data sequentially using cmd_pos (like feature check)
-                        if (current_channel < jvs_nodes_r.node_analog_channels[current_device_addr - 1]) begin
-                            if (cmd_pos % 2 == 1) begin
-                                // High byte - store temporarily (cmd_pos starts at 1, so odd = high byte)
+                        case (cmd_pos)
+                            3'd1: begin // Parse byte 1 of current coin slot
                                 temp_high_byte <= com_rx_byte;
+                                // Put MSB in temp
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
-                            end else begin
-                                // Low byte - combine and store final values (cmd_pos even = low byte)
+                            end
+                            3'd2: begin // Parse byte 2 of current channel then jump to next channel if needed
+                                // Assign analog values based on current channel
                                 case (current_channel)
                                     4'd0: begin // Channel 1 - P1 X axis
                                         if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
@@ -2193,22 +2207,28 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     4'd5: begin // Channel 6 - Screen Y
                                         screen_pos_y <= {temp_high_byte, com_rx_byte};
                                     end
-                                    default: ; // Additional channels
+                                    default: ; // Additional channels - no assignment
                                 endcase
-                                // Channel processing complete, advance to next channel
-                                current_channel <= current_channel + 1;
-                                main_state <= STATE_RX_NEXT;
-                                com_rx_next <= 1'b1;
+
+                                // Check if we need to parse the next channel
+                                if (current_channel >= (jvs_nodes_r.node_analog_channels[current_device_addr - 1])) begin
+                                    // Analog channels parsing complete, advance to next command
+                                    current_channel <= 0;
+                                    cmd_pos <= 0;
+                                    return_state <= RX_PARSE_INPUT_CMD;
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                    com_src_cmd_next <= 1'b1;
+                                end else begin
+                                    // Parse next channel
+                                    current_channel <= current_channel + 1;
+                                    cmd_pos <= 0; // Reset to parse next channel's first byte
+                                    return_state <= RX_PARSE_ANLINP;
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end
                             end
-                        end else begin
-                            // All channels processed
-                            cmd_pos <= 0;
-                            current_channel <= 0;
-                            com_src_cmd_next <= 1'b1;
-                            return_state <= RX_PARSE_INPUT_CMD;
-                            main_state <= STATE_RX_NEXT;
-                            com_rx_next <= 1'b1;
-                        end
+                        endcase
                     end else begin
                         // No more data
                         cmd_pos <= 0;
@@ -2481,7 +2501,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
                 STATE_RX_NEXT: begin
                     com_rx_next <= 0;
-                    cmd_pos <= cmd_pos + 1;                    
+                    cmd_pos <= cmd_pos + 1;
                     main_state <= return_state;
                 end
 
