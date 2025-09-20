@@ -866,6 +866,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 if (com_rx_byte == 8'h00) begin
                                     // Found null terminator, store it and finish copying
                                     jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
+                                    node_name_ram[copy_write_idx] <= 8'h00; // Also update RAM for OSD
                                     cmd_pos <= 8'd0;  // Reset position for next command
                                     // Add delay before sending CMDREV command
                                     delay_counter <= IOIDENT_TO_CMDREV_DELAY;
@@ -874,6 +875,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 end else if (copy_write_idx < jvs_node_info_pkg::NODE_NAME_SIZE - 1) begin
                                     // Copy character to node name buffer
                                     jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= com_rx_byte;
+                                    node_name_ram[copy_write_idx] <= com_rx_byte; // Also update RAM for OSD
                                     copy_write_idx <= copy_write_idx + 1;
                                     com_rx_next <= 1'b1;     // Advance to first name character
                                     main_state <= STATE_RX_NEXT;
