@@ -3,9 +3,12 @@
 package jvs_node_info_pkg;
   parameter int MAX_JVS_NODES   = 2;
   parameter int NODE_NAME_SIZE  = 100;
+  parameter int JVS_COIN_MAX    = 4;
 
 	typedef struct {
-		logic [7:0] node_id [0:MAX_JVS_NODES-1];           // Current node name being processed
+		logic [7:0] node_count;
+		logic [7:0] node_id [0:MAX_JVS_NODES-1];           // Node ID (address)
+		logic [7:0] node_name [0:MAX_JVS_NODES-1][0:NODE_NAME_SIZE-1]; // Device name from IOIDENT command
 		logic [7:0] node_cmd_ver [0:MAX_JVS_NODES-1];      // Command version for each node
 		logic [7:0] node_jvs_ver [0:MAX_JVS_NODES-1];      // JVS version for each node  
 		logic [7:0] node_com_ver [0:MAX_JVS_NODES-1];      // Communication version for each node
@@ -21,6 +24,7 @@ package jvs_node_info_pkg;
 		logic       node_has_screen_pos [0:MAX_JVS_NODES-1];     // Screen position input for touch screen support (IR gun on timecrisis 4 uses analogs channels)
 		logic [7:0] node_screen_pos_x_bits [0:MAX_JVS_NODES-1];  // Screen X position resolution (bits)
 		logic [7:0] node_screen_pos_y_bits [0:MAX_JVS_NODES-1];  // Screen Y position resolution (bits)
+		logic [7:0] node_screen_pos_channels [0:MAX_JVS_NODES-1];  // Numbers of resolution bits ? or number of display ?
 		logic [15:0] node_misc_digital_inputs [0:MAX_JVS_NODES-1]; // Miscellaneous digital input bit count (16-bit upto 65536)		
 		// Output capabilities
 		logic [7:0] node_digital_outputs [0:MAX_JVS_NODES-1]; // Number of digital outputs (maybe used to lightup starts buttons)
@@ -33,4 +37,15 @@ package jvs_node_info_pkg;
 		logic [7:0] node_char_display_type [0:MAX_JVS_NODES-1];   // Character display type
 		logic       node_has_backup [0:MAX_JVS_NODES-1];         // Backup data support (unknown usage)
 	} jvs_node_info_t;
+
+	typedef struct {
+		logic [1:0]  condition;    // Coin condition (00=normal, 01=decrease, 10=increase, 11=no_data) 
+		logic [13:0] counter;      // 14-bit coin counter (6 MSB + 8 LSB from protocol)
+	} jvs_coin_slot_t;
+
+	typedef struct {
+		jvs_coin_slot_t slots[JVS_COIN_MAX];  // Up to 4 coin slots per node
+		logic [3:0] active_slots;             // Number of active coin slots
+	} jvs_coin_data_t;
+
 endpackage : jvs_node_info_pkg

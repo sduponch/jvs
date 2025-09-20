@@ -73,6 +73,15 @@ module test_03_device_identification;
     logic [4:0] main_state_prev = 5'h0;
     logic [2:0] rx_state_prev = 3'h0;
 
+    // Monitoring des états jvs_com
+    logic [3:0] com_tx_state_prev = 4'h0;
+    logic [3:0] com_rx_state_prev = 4'h0;
+
+    // Monitoring des états du controller
+    logic [4:0] controller_main_state_prev = 5'h0;
+    logic com_commit_prev = 1'b0;
+    logic com_tx_ready_prev = 1'b1;
+
 
     // Timeout et timing
     logic [31:0] timeout_counter = 0;
@@ -159,6 +168,7 @@ module test_03_device_identification;
                         smart_jvs_bytes[3] == received_commands[commands_received-2]) begin
                         $display("[TEST] ERREUR: Commande 0x%02X répétée 3 fois - Boucle détectée!", smart_jvs_bytes[3]);
                         $display("[TEST] Test arrêté pour éviter une boucle infinie");
+                        analyze_complete_sequence();  // Analyser l'état actuel avant d'arrêter
                         test_passed = 0;
                         test_completed = 1;
                     end
@@ -196,6 +206,56 @@ module test_03_device_identification;
         responses_sent++;
         $display("[TEST] *** RÉPONSE %d ENVOYÉE ***", responses_sent);
         $display("[TEST] Attente pour laisser le contrôleur traiter la réponse...");
+
+        // Arrêter après la 6ème réponse (FEATURE CHECK) pour voir l'identification complète
+        if (responses_sent == 6) begin
+            $display("[TEST] Arrêt après réponse FEATURE CHECK - Séquence d'identification complète");
+            #1000; // Petit délai pour voir le traitement
+            $display("[TEST] STATUS décodé par jvs_com: 0x%02X", dut.com_src_cmd_status);
+            $display("[TEST] Commande FIFO: 0x%02X", dut.com_src_cmd);
+
+            // Afficher l'état complet des nodes JVS
+            $display("[TEST] === JVS NODE INFO STATE (COMPLETE) ===");
+            for (int dev = 0; dev < 2; dev++) begin
+                if (dut.jvs_nodes.node_id[dev] != 8'h00) begin
+                    $display("  Device %d:", dev + 1);
+                    $display("    Node ID: 0x%02X", dut.jvs_nodes.node_id[dev]);
+                    $display("    Command Revision: 0x%02X", dut.jvs_nodes.node_cmd_ver[dev]);
+                    $display("    JVS Revision: 0x%02X", dut.jvs_nodes.node_jvs_ver[dev]);
+                    $display("    Communication Version: 0x%02X", dut.jvs_nodes.node_com_ver[dev]);
+                    $display("    Players: %d", dut.jvs_nodes.node_players[dev]);
+                    $display("    Buttons per player: %d", dut.jvs_nodes.node_buttons[dev]);
+                    $display("    Analog channels: %d", dut.jvs_nodes.node_analog_channels[dev]);
+                    $display("    Coin slots: %d", dut.jvs_nodes.node_coin_slots[dev]);
+                    $display("    Rotary channels: %d", dut.jvs_nodes.node_rotary_channels[dev]);
+                    $display("    Analog bits: %d", dut.jvs_nodes.node_analog_bits[dev]);
+                    $display("    Has keycode input: %d", dut.jvs_nodes.node_has_keycode_input[dev]);
+                    $display("    Has screen position: %d", dut.jvs_nodes.node_has_screen_pos[dev]);
+                    $display("    Digital outputs: %d", dut.jvs_nodes.node_digital_outputs[dev]);
+                end
+            end
+
+            test_completed = 1;
+        end
+    end
+
+    // Monitoring de l'état du FIFO de commandes
+    always @(posedge clk) begin
+        if (dut.jvs_com_inst.cmd_fifo_init) begin
+            $display("[FIFO] INIT: src_cmd=0x%02X, cmd_read_ptr=%d, cmd_count=%d (time: %t)",
+                     dut.jvs_com_inst.src_cmd, dut.jvs_com_inst.cmd_read_ptr,
+                     dut.jvs_com_inst.cmd_count, $time);
+        end
+        if (dut.com_src_cmd_next) begin
+            $display("[FIFO] NEXT: src_cmd=0x%02X -> ?, cmd_read_ptr=%d->%d, cmd_count=%d->%d (time: %t)",
+                     dut.jvs_com_inst.src_cmd, dut.jvs_com_inst.cmd_read_ptr, dut.jvs_com_inst.cmd_read_ptr + 1,
+                     dut.jvs_com_inst.cmd_count, dut.jvs_com_inst.cmd_count - 1, $time);
+        end
+        if (dut.jvs_com_inst.tx_cmd_push && dut.jvs_com_inst.cmd_count < 16) begin
+            $display("[FIFO] PUSH: cmd=0x%02X, cmd_write_ptr=%d->%d, cmd_count=%d->%d (time: %t)",
+                     dut.jvs_com_inst.tx_data, dut.jvs_com_inst.cmd_write_ptr, dut.jvs_com_inst.cmd_write_ptr + 1,
+                     dut.jvs_com_inst.cmd_count, dut.jvs_com_inst.cmd_count + 1, $time);
+        end
     end
 
     // Délai pour attendre que le contrôleur progresse après les ACKs
@@ -274,6 +334,41 @@ module test_03_device_identification;
             if (responses_sent < 6) $display("✗ Pas assez de réponses (%d < 6)", responses_sent);
             if (polling_requests < 3) $display("✗ Polling inputs insuffisant (%d < 3)", polling_requests);
         end
+
+        // Affichage de l'état final de jvs_node_info_pkg
+        $display("\n=== ÉTAT FINAL DES INFORMATIONS JVS (jvs_nodes) ===");
+        for (integer dev = 0; dev < 2; dev++) begin
+            $display("\n--- Device %d (adresse 0x%02X) ---", dev + 1, dev + 1);
+
+            // Versions et révisions parsées
+            $display("  Command Revision: 0x%02X", dut.jvs_nodes.node_cmd_ver[dev]);
+            $display("  JVS Revision: 0x%02X", dut.jvs_nodes.node_jvs_ver[dev]);
+            $display("  Communication Version: 0x%02X", dut.jvs_nodes.node_com_ver[dev]);
+
+            // Capacités du device
+            $display("  Joueurs: %d", dut.jvs_nodes.node_players[dev]);
+            $display("  Boutons par joueur: %d", dut.jvs_nodes.node_buttons[dev]);
+            $display("  Canaux analogiques: %d", dut.jvs_nodes.node_analog_channels[dev]);
+            $display("  Bits analogiques: %d", dut.jvs_nodes.node_analog_bits[dev]);
+            $display("  Canaux rotatifs: %d", dut.jvs_nodes.node_rotary_channels[dev]);
+            $display("  Slots de monnaie: %d", dut.jvs_nodes.node_coin_slots[dev]);
+            $display("  Sorties numériques: %d", dut.jvs_nodes.node_digital_outputs[dev]);
+            $display("  Canaux sortie analogique: %d", dut.jvs_nodes.node_analog_output_channels[dev]);
+            $display("  Entrée keycode: %s", dut.jvs_nodes.node_has_keycode_input[dev] ? "Oui" : "Non");
+            $display("  Position écran: %s", dut.jvs_nodes.node_has_screen_pos[dev] ? "Oui" : "Non");
+            if (dut.jvs_nodes.node_has_screen_pos[dev]) begin
+                $display("    Résolution X: %d bits", dut.jvs_nodes.node_screen_pos_x_bits[dev]);
+                $display("    Résolution Y: %d bits", dut.jvs_nodes.node_screen_pos_y_bits[dev]);
+            end
+            $display("  Entrées misc digital: 0x%04X", dut.jvs_nodes.node_misc_digital_inputs[dev]);
+            $display("  Affichage caractères: %s", dut.jvs_nodes.node_has_char_display[dev] ? "Oui" : "Non");
+            if (dut.jvs_nodes.node_has_char_display[dev]) begin
+                $display("    Largeur: %d", dut.jvs_nodes.node_char_display_width[dev]);
+                $display("    Hauteur: %d", dut.jvs_nodes.node_char_display_height[dev]);
+                $display("    Type: 0x%02X", dut.jvs_nodes.node_char_display_type[dev]);
+            end
+            $display("  Support backup: %s", dut.jvs_nodes.node_has_backup[dev] ? "Oui" : "Non");
+        end
     endtask
 
     function automatic string get_command_name(logic [7:0] cmd);
@@ -350,21 +445,72 @@ module test_03_device_identification;
                         rx485_dir ? "TX MODE" : "RX MODE", $time);
             end
 
-            // Monitor main state changes
-            if (dut.main_state != main_state_prev) begin
-                main_state_prev <= dut.main_state;
-                $display("[CONTROLLER] Main State: %0d -> %0d (%s) (time: %0t)",
-                        main_state_prev, dut.main_state,
-                        get_main_state_name(dut.main_state), $time);
+            // Monitor JVS_COM TX state changes
+            if (dut.com_tx_state_debug != com_tx_state_prev) begin
+                com_tx_state_prev <= dut.com_tx_state_debug;
+                $display("[JVS_COM] TX State: %0d -> %0d (%s) (time: %0t)",
+                        com_tx_state_prev, dut.com_tx_state_debug,
+                        get_com_tx_state_name(dut.com_tx_state_debug), $time);
             end
 
-            // Monitor RX state changes
-            if (dut.rx_state != rx_state_prev) begin
-                rx_state_prev <= dut.rx_state;
-                $display("[CONTROLLER] RX State: %0d -> %0d (%s) (time: %0t)",
-                        rx_state_prev, dut.rx_state,
-                        get_rx_state_name(dut.rx_state), $time);
+            // Monitor JVS_COM RX state changes
+            if (dut.com_rx_state_debug != com_rx_state_prev) begin
+                com_rx_state_prev <= dut.com_rx_state_debug;
+                $display("[JVS_COM] RX State: %0d -> %0d (%s) (time: %0t)",
+                        com_rx_state_prev, dut.com_rx_state_debug,
+                        get_com_rx_state_name(dut.com_rx_state_debug), $time);
             end
+
+            // Monitor controller main state changes
+            if (dut.main_state != controller_main_state_prev) begin
+                controller_main_state_prev <= dut.main_state;
+                $display("[CONTROLLER] State change: %0d -> %0d (%s) (time: %0t)",
+                        controller_main_state_prev, dut.main_state,
+                        get_controller_state_name(dut.main_state), $time);
+            end
+
+            // Monitor com_commit signal changes
+            if (dut.com_commit != com_commit_prev) begin
+                com_commit_prev <= dut.com_commit;
+                $display("[CONTROLLER] com_commit: %0d -> %0d (time: %0t)",
+                        !dut.com_commit, dut.com_commit, $time);
+            end
+
+            // Monitor tx_ready signal changes
+            if (dut.jvs_com_inst.rs485_tx_enable != com_tx_ready_prev) begin
+                com_tx_ready_prev <= dut.jvs_com_inst.rs485_tx_enable;
+                $display("[JVS_COM] tx_ready: %0d -> %0d (time: %0t)",
+                        !dut.jvs_com_inst.rs485_tx_enable, dut.jvs_com_inst.rs485_tx_enable, $time);
+            end
+
+            // Monitor UART TX signals from jvs_com
+            if (dut.jvs_com_inst.uart_tx_dv) begin
+                $display("[JVS_COM] UART TX DV: byte=0x%02X (time: %0t)",
+                        dut.jvs_com_inst.uart_tx_byte, $time);
+            end
+
+            // Monitor jvs_com RX complete signal (pulse detection)
+            // These signals are checked every clock cycle to catch pulses
+        end
+    end
+
+    // Separate monitoring for pulse signals that need to be caught every cycle
+    always @(posedge clk) begin
+        // Monitor RX complete pulse
+        if (dut.com_rx_complete) begin
+            $display("[JVS_COM] *** RX Complete! *** src_node=0x%02X, src_cmd=0x%02X, rx_byte=0x%02X, remaining=%0d (time: %0t)",
+                    dut.com_src_node, dut.com_src_cmd, dut.com_rx_byte, dut.com_rx_remaining, $time);
+        end
+
+        // Monitor RX error pulse
+        if (dut.com_rx_error) begin
+            $display("[JVS_COM] *** RX Error! *** Checksum failed (time: %0t)", $time);
+        end
+
+        // Monitor RX_VALIDATE state entry for debugging
+        if (dut.com_rx_state_debug == 4'h6) begin // RX_VALIDATE
+            $display("[JVS_COM] RX_VALIDATE: calc_checksum=0x%02X, recv_checksum=0x%02X (time: %0t)",
+                    dut.jvs_com_inst.rx_checksum_calc, dut.jvs_com_inst.rx_checksum_recv, $time);
         end
     end
 
@@ -433,6 +579,75 @@ module test_03_device_identification;
         $dumpfile("test_03_device_identification.vcd");
         $dumpvars(0, test_03_device_identification);
     end
+
+    // Fonctions utilitaires pour l'affichage des états JVS_COM
+    function string get_com_tx_state_name(input [3:0] state);
+        case (state)
+            4'h0: return "TX_IDLE";
+            4'h1: return "TX_SETUP";
+            4'h2: return "TX_SYNC";
+            4'h3: return "TX_NODE";
+            4'h4: return "TX_LENGTH";
+            4'h5: return "TX_DATA";
+            4'h6: return "TX_CHECKSUM";
+            4'h7: return "TX_TRANSMIT_BYTE";
+            4'h8: return "TX_TRANSMIT_BYTE_DONE";
+            4'h9: return "TX_DONE";
+            default: return "TX_UNKNOWN";
+        endcase
+    endfunction
+
+    function string get_com_rx_state_name(input [3:0] state);
+        case (state)
+            4'h0: return "RX_IDLE";
+            4'h1: return "RX_SYNC";
+            4'h2: return "RX_NODE";
+            4'h3: return "RX_LENGTH";
+            4'h4: return "RX_DATA";
+            4'h5: return "RX_CHECKSUM";
+            4'h6: return "RX_VALIDATE";
+            4'h7: return "RX_ESCAPE_WAIT";
+            default: return "RX_UNKNOWN";
+        endcase
+    endfunction
+
+    function string get_controller_state_name(input [4:0] state);
+        case (state)
+            5'h00: return "IDLE";
+            5'h01: return "WAIT_RX";
+            5'h02: return "INIT_DELAY";
+            5'h03: return "FIRST_RESET";
+            5'h04: return "FIRST_RESET_DELAY";
+            5'h05: return "SECOND_RESET";
+            5'h06: return "SECOND_RESET_DELAY";
+            5'h07: return "SEND_SETADDR";
+            5'h08: return "PARSE_SETADDR";
+            5'h09: return "SEND_IOIDENT";
+            5'h0A: return "PARSE_IOIDENT";
+            5'h0B: return "SEND_CMDREV";
+            5'h0C: return "PARSE_CMDREV";
+            5'h0D: return "SEND_JVSREV";
+            5'h0E: return "PARSE_COMMVER";
+            5'h0F: return "PARSE_JVSREV";
+            5'h10: return "SEND_COMMVER";
+            5'h11: return "SEND_FEATCHK";
+            5'h12: return "SEND_INPUTS";
+            5'h13: return "SEND_INPUTS_SWITCH";
+            5'h14: return "SEND_INPUTS_COIN";
+            5'h15: return "SEND_INPUTS_ANALOG";
+            5'h16: return "SEND_INPUTS_ROTARY";
+            5'h17: return "SEND_INPUTS_KEYCODE";
+            5'h18: return "SEND_INPUTS_SCREEN";
+            5'h19: return "SEND_INPUTS_MISC";
+            5'h1A: return "SEND_OUTPUT_DIGITAL";
+            5'h1B: return "SEND_FINALIZE";
+            5'h1C: return "FIRST_RESET_ARG";
+            5'h1D: return "TX_NEXT";
+            5'h1E: return "RX_NEXT";
+            5'h1F: return "FATAL_ERROR";
+            default: return $sformatf("STATE_%0d", state);
+        endcase
+    endfunction
 
 endmodule
 
