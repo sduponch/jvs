@@ -164,9 +164,9 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     //=========================================================================
 
     // Common delay timings (in clock cycles at MASTER_CLK_FREQ)
-    localparam logic [31:0] INIT_DELAY_COUNT = MASTER_CLK_FREQ * 5.4; // 5.4 seconds
-    localparam logic [31:0] FIRST_RESET_DELAY_COUNT = MASTER_CLK_FREQ * 2; // 2 seconds
-    localparam logic [31:0] SECOND_RESET_DELAY_COUNT = MASTER_CLK_FREQ / 2; // 0.5 seconds
+    localparam logic [31:0] INIT_DELAY_COUNT = MASTER_CLK_FREQ * 6; // 5.4 seconds
+    localparam logic [31:0] FIRST_RESET_DELAY_COUNT = MASTER_CLK_FREQ * 1; // 2 seconds
+    localparam logic [31:0] SECOND_RESET_DELAY_COUNT = MASTER_CLK_FREQ * 3; // 0.5 seconds
     localparam logic [15:0] TX_SETUP_DELAY_COUNT = MASTER_CLK_FREQ / 100_000; // ~10µs
     localparam logic [15:0] TX_HOLD_DELAY_COUNT = MASTER_CLK_FREQ / 33_333; // ~30µs
     localparam logic [31:0] RX_TIMEOUT_COUNT = MASTER_CLK_FREQ * 2; // 1s (augmenté pour le parsing des features)
@@ -204,7 +204,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     //=========================================================================
     
     // INITIALIZATION SEQUENCE STATES (5.4s + 2s + 0.5s delays)
-    localparam STATE_IDLE = 6'h00;             // Idle state - continuous input polling (1ms interval)
+    localparam STATE_NODES_POOLING = 6'h00;    // Multi-node cyclic polling state (1ms interval per node)
     localparam STATE_INIT_DELAY = 6'h02;       // Initial 5.4s delay for system stabilization
     localparam STATE_FIRST_RESET = 6'h03;      // Send first reset command (F0 D9)
     localparam STATE_FIRST_RESET_DELAY = 6'h04; // 2-second delay after first reset
@@ -303,6 +303,11 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     logic [31:0] delay_counter;    // Multi-purpose delay counter
     logic [31:0] timeout_counter;  // Timeout counter for waiting states
     logic [31:0] poll_timer;       // Timer for input polling frequency
+
+    // Timeout and success state management for STATE_SEND commands
+    logic [5:0]  on_timeout_state;       // State to go to on timeout
+    logic [5:0]  on_success_state;       // State to go to on success
+    logic [7:0]  timeout_retry_count;    // Generic timeout retry counter
 
     logic [7:0] current_device_addr; // Address assigned to JVS device (usually 0x01)
     logic polling_mode;            // Flag indicating we're in polling mode (after full initialization)
@@ -413,6 +418,11 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
             delay_counter <= 32'h0;
             timeout_counter <= 32'h0;
             poll_timer <= 32'h0;
+
+            // Initialize timeout and success state management
+            on_timeout_state <= STATE_FATAL_ERROR;      // Default timeout state
+            on_success_state <= STATE_NODES_POOLING;    // Default success state
+            timeout_retry_count <= 8'h00;               // Reset timeout retry counter
           
             // Initialize TX state management
             return_state <= 6'h0;
@@ -465,13 +475,27 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
             jvs_data_ready_init <= 1'b0; // data ready is a pulse
             case (main_state)
                 //-------------------------------------------------------------
-                // IDLE STATE - Continuous input polling for responsive gaming
+                // NODES POOLING STATE - Multi-node cyclic polling for responsive gaming
                 //-------------------------------------------------------------
-                STATE_IDLE: begin
+                STATE_NODES_POOLING: begin
                     if (poll_timer < POLL_INTERVAL_COUNT) begin  // 1ms
                         poll_timer <= poll_timer + 1;
                     end else begin
                         poll_timer <= 32'h0;
+
+                        // Multi-node cyclic polling: rotate through all configured nodes
+                        if (jvs_nodes_r.node_count > 1) begin
+                            // Multiple nodes configured - cycle through them
+                            if (current_device_addr >= jvs_nodes_r.node_count) begin
+                                current_device_addr <= 8'h01;  // Reset to first node
+                            end else begin
+                                current_device_addr <= current_device_addr + 1;  // Next node
+                            end
+                        end else begin
+                            // Single node or no nodes - keep address at 0x01
+                            current_device_addr <= 8'h01;
+                        end
+
                         main_state <= STATE_SEND_INPUTS;
                     end
                 end
@@ -582,6 +606,20 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // SET ADDRESS COMMAND - Assign unique address to device
                 //-------------------------------------------------------------
                 STATE_SEND_SETADDR: begin
+                    // Configure timeout and success states for this command
+                    timeout_counter <= RX_TIMEOUT_COUNT;           // Set timeout value
+
+                    // Configure timeout handling based on retry count and node count
+                    if (timeout_retry_count >= 8'd3 && jvs_nodes_r.node_count > 0) begin
+                        // After 3 timeouts and at least 1 node configured: ignore i_sense and go to polling
+                        on_timeout_state <= STATE_NODES_POOLING;
+                    end else begin
+                        // Normal timeout: retry SETADDR
+                        on_timeout_state <= STATE_SEND_SETADDR;
+                    end
+
+                    on_success_state <= STATE_SEND_IOIDENT;        // On success: go to next command
+
                     // Send SET ADDRESS command using sequential byte transmission
                     return_state <= STATE_SEND_SETADDR; // STATE TO GO BACK from STATE_TX_NEXT
                     if (com_tx_ready) begin
@@ -632,9 +670,9 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                         end
                         default: begin
                             cmd_pos <= 8'd0;          // Reset position for next command
-                            // Add delay before sending IOIDENT command
+                            // Add delay before going to configured success state
                             delay_counter <= SETADDR_TO_IOIDENT_DELAY;
-                            return_state <= STATE_SEND_IOIDENT;
+                            return_state <= on_success_state;
                             main_state <= STATE_MAIN_TIMER_DELAY;
                         end
                     endcase
@@ -644,6 +682,11 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // READ ID COMMAND - Request device identification
                 //-------------------------------------------------------------
                 STATE_SEND_IOIDENT: begin
+                    // Configure timeout and success states for this command
+                    timeout_counter <= RX_TIMEOUT_COUNT;           // Set timeout value
+                    on_timeout_state <= STATE_SEND_IOIDENT;        // On timeout: retry immediately
+                    on_success_state <= STATE_SEND_CMDREV;         // On success: go to next command
+
                     if (com_tx_ready) begin
                         // Initialize command parameters on first entry
                         com_dst_node <= current_device_addr; // 01 - Address specific device
@@ -706,14 +749,14 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     com_rx_next <= 1'b1;     // Advance to first name character
                                     cmd_pos <= 8'd0;  // Reset position for next command
                                     delay_counter <= IOIDENT_TO_CMDREV_DELAY;
-                                    return_state <= STATE_SEND_CMDREV;
+                                    return_state <= on_success_state;
                                     main_state <= STATE_MAIN_TIMER_DELAY;
                                 end
                             end else begin
                                 // End of data reached without null terminator
                                 cmd_pos <= 8'd0;
                                 delay_counter <= IOIDENT_TO_CMDREV_DELAY;
-                                return_state <= STATE_SEND_CMDREV;
+                                return_state <= on_success_state;
                                 main_state <= STATE_MAIN_TIMER_DELAY;
                             end
                         end
@@ -724,6 +767,11 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // COMMAND REVISION REQUEST - Get command format revision
                 //-------------------------------------------------------------
                 STATE_SEND_CMDREV: begin
+                    // Configure timeout and success states for this command
+                    timeout_counter <= RX_TIMEOUT_COUNT;           // Set timeout value
+                    on_timeout_state <= STATE_SEND_CMDREV;         // On timeout: retry immediately
+                    on_success_state <= STATE_SEND_JVSREV;         // On success: go to next command
+
                     if (com_tx_ready) begin
                         // Initialize command parameters on first entry
                         main_state <= STATE_TX_NEXT;
@@ -766,13 +814,13 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                             jvs_nodes_r.node_cmd_ver[current_device_addr - 1] <= com_rx_byte;
                             cmd_pos <= 8'd0;          // Reset position for next command
                             delay_counter <= CMDREV_TO_JVSREV_DELAY;
-                            return_state <= STATE_SEND_JVSREV;
+                            return_state <= on_success_state;
                             main_state <= STATE_MAIN_TIMER_DELAY;
                         end
                         default: begin
                             cmd_pos <= 8'd0;          // Reset position for next command
                             delay_counter <= CMDREV_TO_JVSREV_DELAY;
-                            return_state <= STATE_SEND_JVSREV;
+                            return_state <= on_success_state;
                             main_state <= STATE_MAIN_TIMER_DELAY;
                         end
                     endcase
@@ -897,6 +945,19 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // FEATURE CHECK REQUEST - Get device capabilities
                 //-------------------------------------------------------------
                 STATE_SEND_FEATCHK: begin
+                    // Configure timeout and success states for this command
+                    timeout_counter <= RX_TIMEOUT_COUNT;           // Set timeout value
+                    on_timeout_state <= STATE_SEND_FEATCHK;        // On timeout: retry immediately
+
+                    // Configure success state based on i_sense (more nodes to configure?)
+                    if (i_sense == 1'b0) begin
+                        // More nodes to configure - go to SETADDR for next node after feature parsing
+                        on_success_state <= STATE_SEND_SETADDR;
+                    end else begin
+                        // All nodes configured - proceed to input polling via STATE_NODES_POOLING
+                        on_success_state <= STATE_NODES_POOLING;
+                    end
+
                     // Send FEATCHK command using sequential byte transmission
                     if (com_tx_ready) begin
                         // Initialize command parameters on first entry
@@ -945,12 +1006,21 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                         case (cmd_pos)
                             3'd1: begin // FUNC
                                 if (com_rx_byte == 8'h00) begin
-                                    // Terminator found - feature parsing complete
+                                    // Terminator found - feature parsing complete for this node
                                     jvs_data_ready_init <= 1'b1;
                                     cmd_pos <= 8'd0;
-                                    // Add delay before going to input polling
+
+                                    // Increment node count for this configured node
+                                    jvs_nodes_r.node_count <= jvs_nodes_r.node_count + 1;
+
+                                    // If going to SETADDR for next node, increment device address
+                                    if (on_success_state == STATE_SEND_SETADDR) begin
+                                        current_device_addr <= current_device_addr + 1;
+                                    end
+
+                                    // Add delay before going to configured success state
                                     delay_counter <= FEATURES_TO_IDLE_DELAY;
-                                    return_state <= STATE_SEND_INPUTS;
+                                    return_state <= on_success_state;
                                     main_state <= STATE_MAIN_TIMER_DELAY;
                                 end else begin
                                     // Store function code and continue
@@ -1057,6 +1127,11 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                     // Send input commands using new jvs_com interface
                     // Mark that we're now in polling mode (initialization complete)
                     polling_mode <= 1'b1;
+
+                    // Configure timeout and success states for input polling
+                    timeout_counter <= RX_TIMEOUT_COUNT;           // Set timeout value
+                    on_timeout_state <= STATE_NODES_POOLING;       // On timeout: return to nodes polling cycle
+                    on_success_state <= STATE_NODES_POOLING;       // On success: return to nodes polling cycle
 
                     if (com_tx_ready) begin
                         // Set destination node
@@ -2234,6 +2309,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                         // Check STATUS byte decoded by jvs_com from received frame
                         if (com_src_cmd_status == STATUS_NORMAL) begin
                             timeout_counter <= 32'h0;
+                            timeout_retry_count <= 8'h00;  // Reset retry count on success
                             // STATUS OK, dispatch to appropriate parser
                             cmd_pos <= 8'd0;
                             case (com_src_cmd)
@@ -2261,25 +2337,16 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 CMD_JVSREV: main_state <= STATE_SEND_JVSREV;     // Retry JVS revision
                                 CMD_COMMVER: main_state <= STATE_SEND_COMMVER;   // Retry comm version
                                 CMD_FEATCHK: main_state <= STATE_SEND_FEATCHK;   // Retry feature check
-                                default: main_state <= STATE_IDLE;               // Continue with polling
+                                default: main_state <= STATE_NODES_POOLING;      // Continue with polling
                             endcase
                         end
                     //end else if (timeout_counter < 32'h0C3500) begin  // 10ms timeout - fast for responsive gaming
-                    end else if (timeout_counter < RX_TIMEOUT_COUNT) begin  // 10ms timeout - fast for responsive gaming
-                        timeout_counter <= timeout_counter + 1;
+                    end else if (timeout_counter > 0) begin
+                        timeout_counter <= timeout_counter - 1;
                     end else begin
-                        // Timeout handling - different strategies for different commands
-                        case (com_src_cmd)
-                            /*
-                            CMD_SETADDR: main_state <= STATE_FIRST_RESET;    // Critical - restart sequence
-                            CMD_IOIDENT: main_state <= STATE_SEND_IOIDENT;     // Retry ID read
-                            CMD_CMDREV: main_state <= STATE_SEND_CMDREV;     // Retry command revision
-                            CMD_JVSREV: main_state <= STATE_SEND_JVSREV;     // Retry JVS revision
-                            CMD_COMMVER: main_state <= STATE_SEND_COMMVER;   // Retry comm version
-                            CMD_FEATCHK: main_state <= STATE_SEND_FEATCHK;   // Retry feature check
-                            */
-                            default: main_state <= STATE_FATAL_ERROR;               // Continue with polling
-                        endcase
+                        // Timeout reached - increment retry count and go to configured timeout state
+                        timeout_retry_count <= timeout_retry_count + 1;
+                        main_state <= on_timeout_state;
                     end
                 end
 
