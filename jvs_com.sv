@@ -160,7 +160,6 @@ module jvs_com
     // Internal frame buffers
     reg [7:0]   tx_frame_node;
     reg [7:0]   tx_frame_length;
-    reg [7:0]   tx_frame_data [0:JVS_BUFFER_SIZE-1];
     reg [7:0]   tx_frame_cmd;        // First byte (CMD) for RX echo
     
     // Edge detection registers for TX control signals
@@ -170,25 +169,8 @@ module jvs_com
     wire commit_negedge = commit_d & ~commit;
     
     //////////////////////////////////////////////////////////////////////
-    // Generate block for API buffer to frame data copying
+    // Buffer copying eliminated - using tx_data_buffer directly
     //////////////////////////////////////////////////////////////////////
-    
-    genvar i;
-    generate
-        for (i = 0; i < JVS_BUFFER_SIZE; i++) begin : gen_buffer_copy
-            always @(posedge clk_sys) begin
-                if (reset) begin
-                    tx_frame_data[i] <= 8'h00;
-                end else if (tx_commit_pending && tx_state == TX_SETUP) begin
-                    if (i < tx_data_count) begin
-                        tx_frame_data[i] <= tx_data_buffer[i];
-                    end else begin
-                        tx_frame_data[i] <= 8'h00;  // Clear unused bytes
-                    end
-                end
-            end
-        end
-    endgenerate
 
     //////////////////////////////////////////////////////////////////////
     // UART Instance
@@ -426,22 +408,22 @@ module jvs_com
                 
                 TX_DATA: begin
                     if (tx_data_idx < tx_data_count) begin
-                        if (needs_escape(tx_frame_data[tx_data_idx])) begin
+                        if (needs_escape(tx_data_buffer[tx_data_idx])) begin
                             if (!tx_escape_pending) begin
                                 uart_tx_byte <= JVS_ESCAPE;
                                 tx_escape_pending <= 1'b1;
-                                tx_escape_byte <= get_escape_byte(tx_frame_data[tx_data_idx]);
+                                tx_escape_byte <= get_escape_byte(tx_data_buffer[tx_data_idx]);
                                 tx_next_state <= TX_DATA;  // Revenir pour envoyer l'échappement
                             end else begin
                                 uart_tx_byte <= tx_escape_byte;
                                 tx_escape_pending <= 1'b0;
-                                tx_checksum <= tx_checksum + tx_frame_data[tx_data_idx];
+                                tx_checksum <= tx_checksum + tx_data_buffer[tx_data_idx];
                                 tx_data_idx <= tx_data_idx + 1;
                                 tx_next_state <= TX_DATA;  // Continuer avec le prochain byte
                             end
                         end else begin
-                            uart_tx_byte <= tx_frame_data[tx_data_idx];
-                            tx_checksum <= tx_checksum + tx_frame_data[tx_data_idx];
+                            uart_tx_byte <= tx_data_buffer[tx_data_idx];
+                            tx_checksum <= tx_checksum + tx_data_buffer[tx_data_idx];
                             tx_data_idx <= tx_data_idx + 1;
                             tx_next_state <= TX_DATA;  // Continuer avec le prochain byte
                         end
