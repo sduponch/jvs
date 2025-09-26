@@ -221,29 +221,7 @@ module jvs_com
     reg rs485_tx_enable;
     reg rx_to_tx_pending;  // Flag to indicate transition from RX to TX needed
     assign o_rs485_dir = rs485_tx_enable;
-
-    
-    //////////////////////////////////////////////////////////////////////
-    // Checksum Calculation Function
-    //////////////////////////////////////////////////////////////////////
-    
-    function automatic [7:0] calculate_checksum(
-        input [7:0] node,
-        input [7:0] length,
-        input [7:0] data_array [0:JVS_BUFFER_SIZE-1],
-        input [7:0] data_len
-    );
-        reg [7:0] sum;
-        integer i;
-        begin
-            sum = node + length;
-            for (i = 0; i < data_len; i = i + 1) begin
-                sum = sum + data_array[i];
-            end
-            calculate_checksum = sum;
-        end
-    endfunction
-    
+  
     //////////////////////////////////////////////////////////////////////
     // TX State Machine
     //////////////////////////////////////////////////////////////////////
@@ -252,8 +230,6 @@ module jvs_com
     assign uart_tx_valid = uart_tx_dv;
     reg [7:0] uart_tx_byte;
     assign uart_tx_data = uart_tx_byte;
-
-    // uart_tx_active and uart_tx_done are now directly connected to UART module outputs
     
     //////////////////////////////////////////////////////////////////////
     // TX Data Buffer Management
