@@ -188,7 +188,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     localparam logic [31:0] JVSREV_TO_COMMVER_DELAY = MASTER_CLK_FREQ / 1000; // 1ms delay after JVSREV
     localparam logic [31:0] COMMVER_TO_FEATURES_DELAY = MASTER_CLK_FREQ / 1000; // 1ms delay after COMMVER
     localparam logic [31:0] FEATURES_TO_IDLE_DELAY = MASTER_CLK_FREQ / 500; // 2ms delay after FEATURES
-    localparam logic [31:0] POLLING_INTERVAL_DELAY = MASTER_CLK_FREQ / 1000; // 1ms delay between polling cycles
+    localparam logic [31:0] POLLING_INTERVAL_DELAY = MASTER_CLK_FREQ / 100; // 5ms delay between polling cycles (required for SEGA 838-13683B, newer cards tested working with 1ms)
 
     // JVS Frame structure constants for better code readability
     localparam JVS_SYNC_POS = 8'd0;          // Position of sync byte (E0)
