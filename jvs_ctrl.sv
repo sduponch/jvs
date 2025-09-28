@@ -61,7 +61,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     output jvs_node_info_t jvs_nodes,
     //RAM interface for node names (for debug/display purposes)
     output logic [7:0] node_name_rd_data,
-    input logic [6:0] node_name_rd_addr
+    input logic [jvs_node_info_pkg::NAME_BRAM_ADDR_BITS-1:0] node_name_rd_addr  // Calculated address width based on BRAM size
 ); 
 
     localparam UART_CLKS_PER_BIT = MASTER_CLK_FREQ / 115200;
@@ -112,6 +112,10 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
 
     // Name copying variables for device identification parsing
     logic [7:0] copy_write_idx;         // Write index for name copying
+
+    // Checksum calculation variables for BRAM optimization
+    logic [15:0] name_checksum_crc;     // Current CRC16 checksum being calculated
+    logic [jvs_node_info_pkg::NAME_BRAM_ADDR_BITS-1:0] name_bram_write_addr;  // Current BRAM write address
 
     logic [3:0] current_player;
     logic [7:0] current_channel;
@@ -370,13 +374,14 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
 `endif
 
     //=========================================================================
-    // RAM for current node name during reception
-    (* ramstyle = "M10K" *) logic [7:0] node_name_ram [0:jvs_node_info_pkg::NODE_NAME_SIZE -1];
+    // RAM for all node names (optimized BRAM storage)
+    // Each node occupies NODE_NAME_SIZE bytes at address: node_index * NODE_NAME_SIZE
+    (* ramstyle = "M10K" *) logic [7:0] node_name_ram [0:(jvs_node_info_pkg::MAX_JVS_NODES * jvs_node_info_pkg::NODE_NAME_SIZE) - 1];
 
 ////initial content for simulation without JVS device
 `ifdef USE_DUMMY_JVS_DATA
     initial begin
-        $readmemh("jvs_device_name.mem", node_name_ram); //null terminated string "namco ltd.;NAJV2;Ver1.00;JPN,Multipurpose."
+        $readmemh("jvs_device_name.mem", node_name_ram, 0, jvs_node_info_pkg::NODE_NAME_SIZE-1); //null terminated string "namco ltd.;NAJV2;Ver1.00;JPN,Multipurpose."
     end
 `endif
 
@@ -732,6 +737,9 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                             // Check REPORT byte
                             if (com_rx_byte == REPORT_NORMAL) begin
                                 copy_write_idx <= 8'd0;  // Reset write index for name copying
+                                // Initialize checksum calculation and BRAM address
+                                name_checksum_crc <= 16'h0000;  // Simple sum checksum initial value
+                                name_bram_write_addr <= (current_device_addr - 1) * jvs_node_info_pkg::NODE_NAME_SIZE;
                                 com_rx_next <= 1'b1;     // Advance to first name character
                                 main_state <= STATE_RX_NEXT;
                             end else begin
@@ -743,17 +751,19 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                             if (com_rx_remaining > 0) begin // > 1 because we need to leave room for checksum
                                 if (com_rx_byte == 8'h00) begin
                                     // Found null terminator, store it and finish copying
-                                    jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
-                                    node_name_ram[copy_write_idx] <= 8'h00; // Also update RAM for OSD
+                                    node_name_ram[name_bram_write_addr + copy_write_idx] <= 8'h00; // Store in BRAM
+                                    // Store final checksum in node info structure
+                                    jvs_nodes_r.node_name_checksum[current_device_addr - 1] <= name_checksum_crc;
                                     cmd_pos <= 8'd0;  // Reset position for next command
                                     // Add delay before sending CMDREV command
                                     delay_counter <= IOIDENT_TO_CMDREV_DELAY;
                                     return_state <= STATE_SEND_CMDREV;
                                     main_state <= STATE_MAIN_TIMER_DELAY;
                                 end else if (copy_write_idx < jvs_node_info_pkg::NODE_NAME_SIZE - 1) begin
-                                    // Copy character to node name buffer
-                                    jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= com_rx_byte;
-                                    node_name_ram[copy_write_idx] <= com_rx_byte; // Also update RAM for OSD
+                                    // Store character in BRAM and update checksum
+                                    node_name_ram[name_bram_write_addr + copy_write_idx] <= com_rx_byte;
+                                    // Simple checksum update (sum of bytes for simplicity)
+                                    name_checksum_crc <= name_checksum_crc + com_rx_byte;
                                     copy_write_idx <= copy_write_idx + 1;
                                     com_rx_next <= 1'b1;     // Advance to first name character
                                     main_state <= STATE_RX_NEXT;
@@ -1537,6 +1547,9 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         // Check REPORT byte
                                         if (com_rx_byte == REPORT_NORMAL) begin
                                             copy_write_idx <= 8'd0;  // Reset write index for name copying
+                                            // Initialize checksum calculation and BRAM address
+                                            name_checksum_crc <= 16'h0000;  // Simple sum checksum initial value
+                                            name_bram_write_addr <= (current_device_addr - 1) * jvs_node_info_pkg::NODE_NAME_SIZE;
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
@@ -1549,25 +1562,33 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         if (com_rx_remaining > 0) begin
                                             if (com_rx_byte == 8'h00) begin
                                                 // Found null terminator, store it and finish copying
-                                                jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
+                                                node_name_ram[name_bram_write_addr + copy_write_idx] <= 8'h00; // Store in BRAM
+                                                // Store final checksum in node info structure
+                                                jvs_nodes_r.node_name_checksum[current_device_addr - 1] <= name_checksum_crc;
                                                 cmd_pos <= 8'd0;
                                                 main_state <= STATE_SEND_CMDREV;
                                             end else if (copy_write_idx < jvs_node_info_pkg::NODE_NAME_SIZE - 1) begin
-                                                // Store character and advance
-                                                jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= com_rx_byte;
+                                                // Store character in BRAM and update checksum
+                                                node_name_ram[name_bram_write_addr + copy_write_idx] <= com_rx_byte;
+                                                // Simple checksum update (sum of bytes for simplicity)
+                                                name_checksum_crc <= name_checksum_crc + com_rx_byte;
                                                 copy_write_idx <= copy_write_idx + 1;
                                                 return_state <= RX_PARSE_INPUT_CMD;
                                                 main_state <= STATE_RX_NEXT;
                                                 com_rx_next <= 1'b1;
                                             end else begin
                                                 // Name too long, truncate and finish
-                                                jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
+                                                node_name_ram[name_bram_write_addr + copy_write_idx] <= 8'h00; // Store in BRAM
+                                                // Store final checksum in node info structure
+                                                jvs_nodes_r.node_name_checksum[current_device_addr - 1] <= name_checksum_crc;
                                                 cmd_pos <= 8'd0;
                                                 main_state <= STATE_SEND_CMDREV;
                                             end
                                         end else begin
                                             // No more data, finish name copy
-                                            jvs_nodes_r.node_name[current_device_addr - 1][copy_write_idx] <= 8'h00;
+                                            node_name_ram[name_bram_write_addr + copy_write_idx] <= 8'h00; // Store in BRAM
+                                            // Store final checksum in node info structure
+                                            jvs_nodes_r.node_name_checksum[current_device_addr - 1] <= name_checksum_crc;
                                             cmd_pos <= 8'd0;
                                             main_state <= STATE_SEND_CMDREV;
                                         end
@@ -2519,13 +2540,10 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                         end
                         $display("  node_has_backup: %b", jvs_nodes_r.node_has_backup[dev]);
                         
-                        // Display device name
-                        $write("  device_name: \"");
-                        for (int i = 0; i < jvs_node_info_pkg::NODE_NAME_SIZE; i++) begin
-                            if (jvs_nodes_r.node_name[dev][i] == 8'h00) break;
-                            $write("%c", jvs_nodes_r.node_name[dev][i]);
-                        end
-                        $display("\"");
+                        // Display device name checksum (name stored in BRAM)
+                        $write("  device_name_checksum: 0x%04x", jvs_nodes_r.node_name_checksum[dev]);
+                        $write("  (name stored in BRAM at addr %d)", dev * jvs_node_info_pkg::NODE_NAME_SIZE);
+                        $display("");
                     end
                     $display("[CONTROLLER][FATAL_ERROR] === END JVS_NODES_R DUMP ===");
                     
