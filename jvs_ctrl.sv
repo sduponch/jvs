@@ -26,18 +26,25 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     input logic i_sense,      // JVS SENSE line (read-only for master)
     output logic o_rx485_dir, // RS485 transceiver direction control (0=RX, 1=TX)
     
-    // Output registers compatible with Analogue Pocket SNAC format
-    output logic [15:0] p1_btn_state,   // Player 1 button states
-    output logic [31:0] p1_joy_state,   // Player 1 analog stick states
-    output logic [15:0] p2_btn_state,   // Player 2 button states
-    output logic [31:0] p2_joy_state,   // Player 2 analog stick states
-    output logic [15:0] p3_btn_state,   // Player 3 button states (reserved)
-    output logic [15:0] p4_btn_state,    // Player 4 button states (reserved)
+    // Output registers for direct interface
+    output logic [15:0] player1_input_switch, // Player 1 digital input switches
+    output logic [15:0] player2_input_switch, // Player 2 digital input switches
+    output logic [15:0] player3_input_switch, // Player 3 digital input switches
+    output logic [15:0] player4_input_switch, // Player 4 digital input switches
+    // Output registers for analog interfaces
+    output logic [15:0] analog_ch1,    // Analog channel 1 (16-bit)
+    output logic [15:0] analog_ch2,    // Analog channel 2 (16-bit)
+    output logic [15:0] analog_ch3,    // Analog channel 3 (16-bit)
+    output logic [15:0] analog_ch4,    // Analog channel 4 (16-bit)
+    output logic [15:0] analog_ch5,    // Analog channel 5 (16-bit)
+    output logic [15:0] analog_ch6,    // Analog channel 6 (16-bit)
+    output logic [15:0] analog_ch7,    // Analog channel 7 (16-bit)
+    output logic [15:0] analog_ch8,    // Analog channel 8 (16-bit)
     
     // Screen position outputs (light gun/touch screen) - raw 16-bit data
+    output logic has_screen_pos,        // Device supports screen position inputs
     output logic [15:0] screen_pos_x,   // Screen X position (16-bit from JVS)
     output logic [15:0] screen_pos_y,   // Screen Y position (16-bit from JVS)
-    output logic has_screen_pos,        // Device supports screen position inputs
 
     // Coin counter outputs (up to 4 coin slots)
     output logic [15:0] coin_count[4],  // Coin counters for each slot (16-bit values)
@@ -429,12 +436,18 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
             cmd_pos <= 8'h0; // genrale parsing pointer
 
             // Initialize output button and joystick states
-            p1_btn_state <= 16'h0000;           // All buttons released
-            p1_joy_state <= 32'h80808080;       // Analog sticks centered (0x80 = center)
-            p2_btn_state <= 16'h0000;
-            p2_joy_state <= 32'h80808080;
-            p3_btn_state <= 16'h0000;
-            p4_btn_state <= 16'h0000;
+            player1_input_switch <= 16'h0000;  // All switches off
+            analog_ch1 <= 16'h8000;            // Analog channel 1 centered
+            analog_ch2 <= 16'h8000;            // Analog channel 2 centered
+            analog_ch3 <= 16'h8000;            // Analog channel 3 centered
+            analog_ch4 <= 16'h8000;            // Analog channel 4 centered
+            analog_ch5 <= 16'h8000;            // Analog channel 5 centered
+            analog_ch6 <= 16'h8000;            // Analog channel 6 centered
+            analog_ch7 <= 16'h8000;            // Analog channel 7 centered
+            analog_ch8 <= 16'h8000;            // Analog channel 8 centered
+            player2_input_switch <= 16'h0000;  // All switches off
+            player3_input_switch <= 16'h0000;  // All switches off
+            player4_input_switch <= 16'h0000;  // All switches off
 
             // Initialize coin counters
             coin_count[0] <= 16'h0000;
@@ -1893,18 +1906,18 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                         4'd0: begin // Player 1
                             if (cmd_pos == 1) begin
                                 // First player data byte
-                                p1_btn_state[15] <= com_rx_byte[7];  // START
-                                p1_btn_state[14] <= com_rx_byte[6];  // SELECT/SERVICE
-                                p1_btn_state[0]  <= com_rx_byte[5];  // UP
-                                p1_btn_state[1]  <= com_rx_byte[4];  // DOWN
-                                p1_btn_state[2]  <= com_rx_byte[3];  // LEFT
-                                p1_btn_state[3]  <= com_rx_byte[2];  // RIGHT
-                                p1_btn_state[4]  <= com_rx_byte[1];  // A (push1)
-                                p1_btn_state[5]  <= com_rx_byte[0];  // B (push2)
+                                player1_input_switch[15] <= com_rx_byte[7];  // START
+                                player1_input_switch[14] <= com_rx_byte[6];  // SELECT/SERVICE
+                                player1_input_switch[0]  <= com_rx_byte[5];  // UP
+                                player1_input_switch[1]  <= com_rx_byte[4];  // DOWN
+                                player1_input_switch[2]  <= com_rx_byte[3];  // LEFT
+                                player1_input_switch[3]  <= com_rx_byte[2];  // RIGHT
+                                player1_input_switch[4]  <= com_rx_byte[1];  // A (push1)
+                                player1_input_switch[5]  <= com_rx_byte[0];  // B (push2)
 
                                 if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
                                     // Only 1 byte per player, clear unused bits and advance to next player
-                                    p1_btn_state[13:6] <= 8'b00000000;
+                                    player1_input_switch[13:6] <= 8'b00000000;
                                     current_player <= current_player + 1;
                                     cmd_pos <= 0;
                                 end
@@ -1912,14 +1925,14 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 com_rx_next <= 1'b1;
                             end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
                                 // Second player data byte (additional buttons)
-                                p1_btn_state[6] <= com_rx_byte[7];   // X (push3)
-                                p1_btn_state[7] <= com_rx_byte[6];   // Y (push4)
-                                p1_btn_state[8] <= com_rx_byte[5];   // push5 -> L1
-                                p1_btn_state[9] <= com_rx_byte[4];   // push6 -> R1
-                                p1_btn_state[10] <= com_rx_byte[3];  // push7 -> L2
-                                p1_btn_state[11] <= com_rx_byte[2];  // push8 -> R2
-                                p1_btn_state[12] <= com_rx_byte[1];  // push9 -> L3
-                                p1_btn_state[13] <= com_rx_byte[0];  // push10 -> R3
+                                player1_input_switch[6] <= com_rx_byte[7];   // X (push3)
+                                player1_input_switch[7] <= com_rx_byte[6];   // Y (push4)
+                                player1_input_switch[8] <= com_rx_byte[5];   // push5 -> L1
+                                player1_input_switch[9] <= com_rx_byte[4];   // push6 -> R1
+                                player1_input_switch[10] <= com_rx_byte[3];  // push7 -> L2
+                                player1_input_switch[11] <= com_rx_byte[2];  // push8 -> R2
+                                player1_input_switch[12] <= com_rx_byte[1];  // push9 -> L3
+                                player1_input_switch[13] <= com_rx_byte[0];  // push10 -> R3
                                 // Advance to next player
                                 current_player <= current_player + 1;
                                 cmd_pos <= 0; // Reset for next player
@@ -1931,18 +1944,18 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                         4'd1: begin // Player 2
                             if (cmd_pos == 1) begin
                                 // First player data byte
-                                p2_btn_state[15] <= com_rx_byte[7];  // START
-                                p2_btn_state[14] <= com_rx_byte[6];  // SELECT/SERVICE
-                                p2_btn_state[0]  <= com_rx_byte[5];  // UP
-                                p2_btn_state[1]  <= com_rx_byte[4];  // DOWN
-                                p2_btn_state[2]  <= com_rx_byte[3];  // LEFT
-                                p2_btn_state[3]  <= com_rx_byte[2];  // RIGHT
-                                p2_btn_state[4]  <= com_rx_byte[1];  // A (push1)
-                                p2_btn_state[5]  <= com_rx_byte[0];  // B (push2)
+                                player2_input_switch[15] <= com_rx_byte[7];  // START
+                                player2_input_switch[14] <= com_rx_byte[6];  // SELECT/SERVICE
+                                player2_input_switch[0]  <= com_rx_byte[5];  // UP
+                                player2_input_switch[1]  <= com_rx_byte[4];  // DOWN
+                                player2_input_switch[2]  <= com_rx_byte[3];  // LEFT
+                                player2_input_switch[3]  <= com_rx_byte[2];  // RIGHT
+                                player2_input_switch[4]  <= com_rx_byte[1];  // A (push1)
+                                player2_input_switch[5]  <= com_rx_byte[0];  // B (push2)
 
                                 if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
                                     // Only 1 byte per player, clear unused bits and advance to next player
-                                    p2_btn_state[13:6] <= 8'b00000000;
+                                    player2_input_switch[13:6] <= 8'b00000000;
                                     current_player <= current_player + 1;
                                     cmd_pos <= 0;
                                 end
@@ -1950,14 +1963,90 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 com_rx_next <= 1'b1;
                             end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
                                 // Second player data byte (additional buttons) - match your reference bit mapping
-                                p2_btn_state[6] <= com_rx_byte[7];   // X (push3)
-                                p2_btn_state[7] <= com_rx_byte[6];   // Y (push4)
-                                p2_btn_state[8] <= com_rx_byte[5];   // push5 -> L1
-                                p2_btn_state[9] <= com_rx_byte[4];   // push6 -> R1
-                                p2_btn_state[10] <= com_rx_byte[3];  // push7 -> L2
-                                p2_btn_state[11] <= com_rx_byte[2];  // push8 -> R2
+                                player2_input_switch[6] <= com_rx_byte[7];   // X (push3)
+                                player2_input_switch[7] <= com_rx_byte[6];   // Y (push4)
+                                player2_input_switch[8] <= com_rx_byte[5];   // push5 -> L1
+                                player2_input_switch[9] <= com_rx_byte[4];   // push6 -> R1
+                                player2_input_switch[10] <= com_rx_byte[3];  // push7 -> L2
+                                player2_input_switch[11] <= com_rx_byte[2];  // push8 -> R2
                                 // Clear unused upper bits for consistency with reference
-                                p2_btn_state[13:12] <= 2'b00;
+                                player2_input_switch[13:12] <= 2'b00;
+                                // Advance to next player
+                                current_player <= current_player + 1;
+                                cmd_pos <= 0; // Reset for next player
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                        end
+
+                        4'd2: begin // Player 3
+                            if (cmd_pos == 1) begin
+                                // First player data byte
+                                player3_input_switch[15] <= com_rx_byte[7];  // START
+                                player3_input_switch[14] <= com_rx_byte[6];  // SELECT/SERVICE
+                                player3_input_switch[0]  <= com_rx_byte[5];  // UP
+                                player3_input_switch[1]  <= com_rx_byte[4];  // DOWN
+                                player3_input_switch[2]  <= com_rx_byte[3];  // LEFT
+                                player3_input_switch[3]  <= com_rx_byte[2];  // RIGHT
+                                player3_input_switch[4]  <= com_rx_byte[1];  // A (push1)
+                                player3_input_switch[5]  <= com_rx_byte[0];  // B (push2)
+
+                                if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
+                                    // Only 1 byte per player, clear unused bits and advance to next player
+                                    player3_input_switch[13:6] <= 8'b00000000;
+                                    current_player <= current_player + 1;
+                                    cmd_pos <= 0;
+                                end
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
+                                // Second player data byte (additional buttons)
+                                player3_input_switch[6] <= com_rx_byte[7];   // X (push3)
+                                player3_input_switch[7] <= com_rx_byte[6];   // Y (push4)
+                                player3_input_switch[8] <= com_rx_byte[5];   // push5 -> L1
+                                player3_input_switch[9] <= com_rx_byte[4];   // push6 -> R1
+                                player3_input_switch[10] <= com_rx_byte[3];  // push7 -> L2
+                                player3_input_switch[11] <= com_rx_byte[2];  // push8 -> R2
+                                // Clear unused upper bits for consistency
+                                player3_input_switch[13:12] <= 2'b00;
+                                // Advance to next player
+                                current_player <= current_player + 1;
+                                cmd_pos <= 0; // Reset for next player
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                        end
+
+                        4'd3: begin // Player 4
+                            if (cmd_pos == 1) begin
+                                // First player data byte
+                                player4_input_switch[15] <= com_rx_byte[7];  // START
+                                player4_input_switch[14] <= com_rx_byte[6];  // SELECT/SERVICE
+                                player4_input_switch[0]  <= com_rx_byte[5];  // UP
+                                player4_input_switch[1]  <= com_rx_byte[4];  // DOWN
+                                player4_input_switch[2]  <= com_rx_byte[3];  // LEFT
+                                player4_input_switch[3]  <= com_rx_byte[2];  // RIGHT
+                                player4_input_switch[4]  <= com_rx_byte[1];  // A (push1)
+                                player4_input_switch[5]  <= com_rx_byte[0];  // B (push2)
+
+                                if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
+                                    // Only 1 byte per player, clear unused bits and advance to next player
+                                    player4_input_switch[13:6] <= 8'b00000000;
+                                    current_player <= current_player + 1;
+                                    cmd_pos <= 0;
+                                end
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
+                                // Second player data byte (additional buttons)
+                                player4_input_switch[6] <= com_rx_byte[7];   // X (push3)
+                                player4_input_switch[7] <= com_rx_byte[6];   // Y (push4)
+                                player4_input_switch[8] <= com_rx_byte[5];   // push5 -> L1
+                                player4_input_switch[9] <= com_rx_byte[4];   // push6 -> R1
+                                player4_input_switch[10] <= com_rx_byte[3];  // push7 -> L2
+                                player4_input_switch[11] <= com_rx_byte[2];  // push8 -> R2
+                                // Clear unused upper bits for consistency
+                                player4_input_switch[13:12] <= 2'b00;
                                 // Advance to next player
                                 current_player <= current_player + 1;
                                 cmd_pos <= 0; // Reset for next player
@@ -1981,7 +2070,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         current_player <= current_player + 1;
                                         cmd_pos <= 0;
                                     end
-                                    main_state <= STATE_FATAL_ERROR;
+                                    main_state <= STATE_RX_NEXT;
                                     com_rx_next <= 1'b1;
                                 end
                                 if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
@@ -2060,43 +2149,39 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                             3'd2: begin // Parse byte 2 of current channel then jump to next channel if needed
                                 // Assign analog values based on current channel
                                 case (current_channel)
-                                    4'd0: begin // Channel 1 - P1 X axis
-                                        if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
-                                            p1_joy_state[31:20] <= ~{temp_high_byte, com_rx_byte[7:4]};
-                                        end else begin
-                                            p1_joy_state[31:24] <= temp_high_byte;
-                                            p1_joy_state[23:16] <= com_rx_byte;
-                                        end
+                                    4'd0: begin // Channel 1 - Analog channel 1
+                                        analog_ch1 <= {temp_high_byte, com_rx_byte};
                                     end
-                                    4'd1: begin // Channel 2 - P1 Y axis
-                                        if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
-                                            p1_joy_state[15:4] <= {temp_high_byte, com_rx_byte[7:4]};
-                                        end else begin
-                                            p1_joy_state[15:8] <= temp_high_byte;
-                                            p1_joy_state[7:0] <= com_rx_byte;
-                                        end
+                                    4'd1: begin // Channel 2 - Analog channel 2
+                                        analog_ch2 <= {temp_high_byte, com_rx_byte};
                                     end
-                                    4'd2: begin // Channel 3 - P2 X axis or screen X for 1 player
+                                    4'd2: begin // Channel 3 - Analog channel 3
+                                        analog_ch3 <= {temp_high_byte, com_rx_byte};
+                                        // Also update screen position if single player for compatibility
                                         if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
                                             screen_pos_x <= {temp_high_byte, com_rx_byte};
-                                        end else begin
-                                            p2_joy_state[31:24] <= temp_high_byte;
-                                            p2_joy_state[23:16] <= com_rx_byte;
                                         end
                                     end
-                                    4'd3: begin // Channel 4 - P2 Y axis or screen Y for 1 player
+                                    4'd3: begin // Channel 4 - Analog channel 4
+                                        analog_ch4 <= {temp_high_byte, com_rx_byte};
+                                        // Also update screen position if single player for compatibility
                                         if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
                                             screen_pos_y <= {temp_high_byte, com_rx_byte};
-                                        end else begin
-                                            p2_joy_state[15:8] <= temp_high_byte;
-                                            p2_joy_state[7:0] <= com_rx_byte;
                                         end
                                     end
-                                    4'd4: begin // Channel 5 - Screen X
-                                        screen_pos_x <= {temp_high_byte, com_rx_byte};
+                                    4'd4: begin // Channel 5 - Analog channel 5
+                                        analog_ch5 <= {temp_high_byte, com_rx_byte};
+                                        screen_pos_x <= {temp_high_byte, com_rx_byte}; // Keep screen compatibility
                                     end
-                                    4'd5: begin // Channel 6 - Screen Y
-                                        screen_pos_y <= {temp_high_byte, com_rx_byte};
+                                    4'd5: begin // Channel 6 - Analog channel 6
+                                        analog_ch6 <= {temp_high_byte, com_rx_byte};
+                                        screen_pos_y <= {temp_high_byte, com_rx_byte}; // Keep screen compatibility
+                                    end
+                                    4'd6: begin // Channel 7 - Analog channel 7
+                                        analog_ch7 <= {temp_high_byte, com_rx_byte};
+                                    end
+                                    4'd7: begin // Channel 8 - Analog channel 8
+                                        analog_ch8 <= {temp_high_byte, com_rx_byte};
                                     end
                                     default: ; // Additional channels - no assignment
                                 endcase
@@ -2321,7 +2406,14 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 CMD_FEATCHK: main_state <= RX_PARSE_FEATURES;
                                 CMD_ANLINP: begin
                                     // Initialize analog parsing variables
-                                    p1_joy_state <= 32'h00000000;
+                                    analog_ch1 <= 16'h8000;
+                                    analog_ch2 <= 16'h8000;
+                                    analog_ch3 <= 16'h8000;
+                                    analog_ch4 <= 16'h8000;
+                                    analog_ch5 <= 16'h8000;
+                                    analog_ch6 <= 16'h8000;
+                                    analog_ch7 <= 16'h8000;
+                                    analog_ch8 <= 16'h8000;
                                     current_channel <= 4'd0;
                                     cmd_pos <= 1; // Initialize to 1 for generic parsing (STATE_RX_NEXT returns to 1, not 0)
                                     main_state <= RX_PARSE_ANLINP;
