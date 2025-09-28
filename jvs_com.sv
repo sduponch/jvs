@@ -230,8 +230,8 @@ module jvs_com
             // Handle command push - store in FIFO on negedge for better timing
             if (tx_cmd_push_negedge && tx_ready && cmd_count < 16) begin
                 cmd_fifo[cmd_write_ptr] <= tx_data;
-                cmd_write_ptr <= cmd_write_ptr + 1;
-                cmd_count <= cmd_count + 1;
+                cmd_write_ptr <= cmd_write_ptr + 1'b1;
+                cmd_count <= cmd_count + 1'b1;
 
                 // Log command push and current FIFO state
                 $write("[%0t] JVS_COM: CMD PUSH 0x%02X -> FIFO[%0d], count=%0d, FIFO: [", $time, tx_data, cmd_write_ptr, cmd_count + 1);
@@ -260,8 +260,8 @@ module jvs_com
                 end
                 $display("]");
 
-                cmd_read_ptr <= cmd_read_ptr + 1;
-                cmd_count <= cmd_count - 1;
+                cmd_read_ptr <= cmd_read_ptr + 1'b1;
+                cmd_count <= cmd_count - 1'b1;
 
                 // Update src_cmd with next command if available
                 // Use the incremented read pointer value (will be available next cycle)
