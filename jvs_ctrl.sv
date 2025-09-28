@@ -53,8 +53,8 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     output logic coin3,                 // Coin increase signal for slot 3
     output logic coin4,                 // Coin increase signal for slot 4
     
-    // GPIO control from SNAC
-    input logic [7:0] gpio_output_value, // GPIO output value from SNAC (0x80=active, 0x00=inactive)
+    // Digital output from SNAC
+    input logic [15:0] output_digital_ch1, // Digital output channel 1 from SNAC
 
     //JVS node information structure
     output logic jvs_data_ready,
@@ -1430,12 +1430,12 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                     end
                                     3'd2: begin
-                                        com_tx_data <= gpio_output_value; // Set GPIO1 to current value from SNAC
+                                        com_tx_data <= output_digital_ch1[7:0]; // Set GPIO1 to current value from SNAC
                                         com_tx_data_push <= 1'b1;        // Push as data
                                         main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                     end
                                     3'd3: begin
-                                        com_tx_data <= 8'hA0;            // do not know what A is for, but taken from TC4 capture
+                                        com_tx_data <= output_digital_ch1[15:8]; // Use MSB from SNAC module
                                         com_tx_data_push <= 1'b1;        // Push as data
                                         main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                     end
