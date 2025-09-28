@@ -152,7 +152,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: RndMnkIII/JVS_Debugger
-        ref: jvs_submodule
+        ref: main
         path: JVS_Debugger
         submodules: 'recursive'
 
@@ -378,3 +378,4 @@ jobs:
           echo "❌ JVS_Debugger compilation failed"
           exit 1
         fi
+
