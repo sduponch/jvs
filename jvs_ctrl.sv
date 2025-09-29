@@ -89,6 +89,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     
     // RX interface signals
     logic [7:0] com_rx_byte;        // Current data byte from RX
+    logic       com_rx_ready;       // Data in com_rx_byte is valid (BRAM timing)
     logic       com_rx_next;        // Pulse to get next RX byte
     logic [7:0] com_rx_remaining;   // Bytes remaining (0 = current is last)
     logic [7:0] com_src_node;       // Source node of response
@@ -98,6 +99,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     logic [4:0] com_src_cmd_count;  // Number of commands available in FIFO
     logic       com_rx_complete;    // Pulse when RX frame complete
     logic       com_rx_error;       // RX checksum or format error
+
 
     // Debug/Status signals from jvs_com
     logic [3:0] com_tx_state_debug;
@@ -150,6 +152,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
         
         // RX Interface
         .rx_byte(com_rx_byte),
+        .rx_ready(com_rx_ready),
         .rx_next(com_rx_next),
         .rx_remaining(com_rx_remaining),
         .src_node(com_src_node),
@@ -1007,6 +1010,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
 
                 RX_PARSE_FEATURES: begin
+                    $display("RX_PARSE_FEATURES");
                     return_state <= RX_PARSE_FEATURES;
                     case (cmd_pos)
                         3'd0: begin
@@ -1024,6 +1028,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                     endcase
                 end
                 RX_PARSE_FEATURES_FUNCS: begin
+                    $display("RX_PARSE_FEATURES_FUNC com_rx_remaining(%d), cmd_pos(%d), com_rx_byte(0x%02x)", com_rx_remaining, cmd_pos, com_rx_byte);
                     return_state <= RX_PARSE_FEATURES_FUNCS;
                     if (com_rx_remaining > 0) begin
                         case (cmd_pos)
@@ -2497,8 +2502,12 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
                 STATE_RX_NEXT: begin
                     com_rx_next <= 0;
-                    cmd_pos <= cmd_pos + 1;
-                    main_state <= return_state;
+                    // Wait for BRAM read to complete (com_rx_ready = 1)
+                    if (com_rx_ready) begin
+                        cmd_pos <= cmd_pos + 1;
+                        main_state <= return_state;
+                    end
+                    // Stay in this state until data is ready
                 end
 
                 //-------------------------------------------------------------
