@@ -107,7 +107,7 @@ jobs:
       uses: actions/cache@v4
       id: quartus-cache
       with:
-        path: quartus
+        path: /home/runner/quartus/
         key: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
         restore-keys: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
 
@@ -130,7 +130,7 @@ jobs:
       if: steps.quartus-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
-        path: quartus
+        path: /home/runner/quartus/
         key: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
 
     - name: Check cache usage
@@ -378,4 +378,5 @@ jobs:
           echo "❌ JVS_Debugger compilation failed"
           exit 1
         fi
+
 
