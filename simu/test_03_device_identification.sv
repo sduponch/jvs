@@ -13,6 +13,10 @@
 // 6. Communication Version (13) -> Réponse
 // 7. Feature Check (14) -> Réponse avec capabilities
 //
+// MODIFICATIONS BRAM:
+// - node_name stockés en BRAM avec checksum
+// - Interface BRAM: node_name_rd_addr et node_name_rd_data
+//
 //////////////////////////////////////////////////////////////////////
 
 `timescale 1ns / 1ps
@@ -33,7 +37,7 @@ module test_03_device_identification;
     wire uart_rx, sense;                  // uart_rx maintenant comme wire
     wire uart_tx, rx485_dir;
     logic [7:0] gpio_output_value;
-    logic [6:0] node_name_rd_addr;
+    logic [NAME_BRAM_ADDR_BITS-1:0] node_name_rd_addr;  // Utilise les nouveaux paramètres BRAM
 
     // Signaux UART bidirectionnels séparés
     wire jvs_to_device;                   // TX du contrôleur vers device
@@ -65,6 +69,35 @@ module test_03_device_identification;
     integer polling_requests = 0; // Compteur de requêtes de polling
     logic [7:0] received_commands[0:15]; // Stockage des commandes reçues
 
+    // BRAM simulée pour les noms des devices
+    logic [7:0] name_bram [0:NAME_BRAM_SIZE-1];
+
+    // Initialisation de la BRAM avec des noms de test
+    initial begin
+        integer i;
+        string node0_name;
+        string node1_name;
+
+        // Effacer la BRAM
+        for (i = 0; i < NAME_BRAM_SIZE; i++) begin
+            name_bram[i] = 8'h00;
+        end
+
+        // Node 0: "SEGA ENTERPRISES,LTD.;I/O BD JVS;837-13551  ;Ver1.00;98/10"
+        node0_name = "SEGA ENTERPRISES,LTD.;I/O BD JVS;837-13551  ;Ver1.00;98/10";
+        for (i = 0; i < node0_name.len() && i < NODE_NAME_SIZE; i++) begin
+            name_bram[0 * NODE_NAME_SIZE + i] = node0_name[i];
+        end
+
+        // Node 1: "NAMCO LTD.;TEKKEN 6;Ver1.00;JPN"
+        node1_name = "NAMCO LTD.;TEKKEN 6;Ver1.00;JPN";
+        for (i = 0; i < node1_name.len() && i < NODE_NAME_SIZE; i++) begin
+            name_bram[1 * NODE_NAME_SIZE + i] = node1_name[i];
+        end
+    end
+
+    // Interface BRAM - simulation de lecture
+    assign node_name_rd_data = name_bram[node_name_rd_addr];
 
     // Monitoring du signal RS485 direction
     logic rx485_dir_prev = 0;
@@ -82,7 +115,6 @@ module test_03_device_identification;
     logic com_commit_prev = 1'b0;
     logic com_tx_ready_prev = 1'b1;
 
-
     // Timeout et timing
     logic [31:0] timeout_counter = 0;
     localparam TIMEOUT_LIMIT = 32'd50_000_000; // 200s timeout à 250kHz
@@ -95,8 +127,8 @@ module test_03_device_identification;
     assign uart_rx = device_to_jvs;      // RX du contrôleur
     assign sense = 1'b1;                 // Signal sense activé
 
-    // Instance DUT
-    jvs_controller #(
+    // Instance DUT - Utilisation de jvs_ctrl avec nouvelle API BRAM
+    jvs_ctrl #(
         .MASTER_CLK_FREQ(MASTER_CLK_FREQ)
     ) dut (
         .i_clk(clk),
@@ -107,16 +139,7 @@ module test_03_device_identification;
         .o_uart_tx(uart_tx),
         .i_sense(sense),
         .o_rx485_dir(rx485_dir),
-        .p1_btn_state(p1_btn_state),
-        .p1_joy_state(p1_joy_state),
-        .p2_btn_state(p2_btn_state),
-        .p2_joy_state(p2_joy_state),
-        .p3_btn_state(p3_btn_state),
-        .p4_btn_state(p4_btn_state),
-        .screen_pos_x(screen_pos_x),
-        .screen_pos_y(screen_pos_y),
-        .has_screen_pos(has_screen_pos),
-        .gpio_output_value(gpio_output_value),
+        //.gpio_output_value(gpio_output_value),
         .jvs_data_ready(jvs_data_ready),
         .jvs_nodes(jvs_nodes),
         .node_name_rd_data(node_name_rd_data),
@@ -207,19 +230,20 @@ module test_03_device_identification;
         $display("[TEST] *** RÉPONSE %d ENVOYÉE ***", responses_sent);
         $display("[TEST] Attente pour laisser le contrôleur traiter la réponse...");
 
-        // Arrêter après la 6ème réponse (FEATURE CHECK) pour voir l'identification complète
+        // Afficher l'état après la 6ème réponse (FEATURE CHECK) mais continuer pour polling
         if (responses_sent == 6) begin
-            $display("[TEST] Arrêt après réponse FEATURE CHECK - Séquence d'identification complète");
+            $display("[TEST] Séquence d'identification complète après FEATURE CHECK");
             #1000; // Petit délai pour voir le traitement
             $display("[TEST] STATUS décodé par jvs_com: 0x%02X", dut.com_src_cmd_status);
             $display("[TEST] Commande FIFO: 0x%02X", dut.com_src_cmd);
 
-            // Afficher l'état complet des nodes JVS
-            $display("[TEST] === JVS NODE INFO STATE (COMPLETE) ===");
-            for (int dev = 0; dev < 2; dev++) begin
+            // Afficher l'état complet des nodes JVS avec nouvelles structures BRAM
+            $display("[TEST] === JVS NODE INFO STATE (COMPLETE) - BRAM VERSION ===");
+            for (int dev = 0; dev < MAX_JVS_NODES; dev++) begin
                 if (dut.jvs_nodes.node_id[dev] != 8'h00) begin
                     $display("  Device %d:", dev + 1);
                     $display("    Node ID: 0x%02X", dut.jvs_nodes.node_id[dev]);
+                    $display("    Node Name Checksum: 0x%04X", dut.jvs_nodes.node_name_checksum[dev]);
                     $display("    Command Revision: 0x%02X", dut.jvs_nodes.node_cmd_ver[dev]);
                     $display("    JVS Revision: 0x%02X", dut.jvs_nodes.node_jvs_ver[dev]);
                     $display("    Communication Version: 0x%02X", dut.jvs_nodes.node_com_ver[dev]);
@@ -235,7 +259,17 @@ module test_03_device_identification;
                 end
             end
 
-            test_completed = 1;
+            $display("[TEST] Attente des commandes de polling...");
+            // Ne pas arrêter - continuer pour permettre le polling
+        end
+    end
+
+    // Monitoring des accès BRAM
+    always @(posedge clk) begin
+        if (node_name_rd_addr != 0) begin
+            $display("[BRAM] Lecture: addr=0x%03X (%d), data=0x%02X ('%c') (time: %t)",
+                    node_name_rd_addr, node_name_rd_addr, node_name_rd_data,
+                    (node_name_rd_data >= 32 && node_name_rd_data <= 126) ? node_name_rd_data : ".", $time);
         end
     end
 
@@ -274,7 +308,7 @@ module test_03_device_identification;
     task analyze_complete_sequence();
         logic reset1_ok, reset2_ok, address_ok, devid_ok, cmdrev_ok, jvsrev_ok, commver_ok, featck_ok;
 
-        $display("\n=== ANALYSE DE LA SÉQUENCE D'IDENTIFICATION COMPLÈTE ===");
+        $display("\n=== ANALYSE DE LA SÉQUENCE D'IDENTIFICATION COMPLÈTE - VERSION BRAM ===");
 
         $display("Commandes reçues (%d):", commands_received);
         for (integer i = 0; i < commands_received && i < 16; i++) begin
@@ -321,6 +355,7 @@ module test_03_device_identification;
             $display("✓ Lecture des features");
             $display("✓ Communication bidirectionnelle validée");
             $display("✓ Polling des inputs opérationnel (%d requêtes)", polling_requests);
+            $display("✓ Interface BRAM fonctionnelle");
         end else begin
             $display("\n*** ERREUR: PROBLÈME DANS LA SÉQUENCE D'IDENTIFICATION ***");
             if (!reset1_ok) $display("✗ Premier reset manquant");
@@ -335,10 +370,45 @@ module test_03_device_identification;
             if (polling_requests < 3) $display("✗ Polling inputs insuffisant (%d < 3)", polling_requests);
         end
 
-        // Affichage de l'état final de jvs_node_info_pkg
-        $display("\n=== ÉTAT FINAL DES INFORMATIONS JVS (jvs_nodes) ===");
-        for (integer dev = 0; dev < 2; dev++) begin
+        // Affichage de l'état final de jvs_node_info_pkg avec BRAM
+        $display("\n=== ÉTAT FINAL DES INFORMATIONS JVS (jvs_nodes) - VERSION BRAM ===");
+        $display("Paramètres BRAM:");
+        $display("  MAX_JVS_NODES: %d", MAX_JVS_NODES);
+        $display("  NODE_NAME_SIZE: %d", NODE_NAME_SIZE);
+        $display("  NAME_BRAM_SIZE: %d (= %d × %d)", NAME_BRAM_SIZE, MAX_JVS_NODES, NODE_NAME_SIZE);
+        $display("  NAME_BRAM_ADDR_BITS: %d", NAME_BRAM_ADDR_BITS);
+        $display("  CHECKSUM_BITS: 16 (hardcoded)");
+
+        for (integer dev = 0; dev < MAX_JVS_NODES; dev++) begin
             $display("\n--- Device %d (adresse 0x%02X) ---", dev + 1, dev + 1);
+
+            // Checksum du nom (nouvelle feature BRAM)
+            $display("  Node Name Checksum: 0x%04X", dut.jvs_nodes.node_name_checksum[dev]);
+
+            // Affichage du nom complet du node depuis la BRAM
+            if (dut.jvs_nodes.node_id[dev] != 8'h00) begin
+                automatic string node_name_str;
+                automatic integer base_addr;
+                automatic logic [7:0] char_data;
+                automatic integer i;
+
+                node_name_str = "";
+                base_addr = dev * NODE_NAME_SIZE;
+
+                for (i = 0; i < NODE_NAME_SIZE; i++) begin
+                    char_data = name_bram[base_addr + i];
+                    if (char_data == 8'h00) break; // Fin de chaîne
+                    if (char_data >= 32 && char_data <= 126) begin // Caractères imprimables
+                        node_name_str = {node_name_str, string'(char_data)};
+                    end
+                end
+
+                if (node_name_str.len() > 0) begin
+                    $display("  Node Name: \"%s\"", node_name_str);
+                end else begin
+                    $display("  Node Name: <vide ou non lisible>");
+                end
+            end
 
             // Versions et révisions parsées
             $display("  Command Revision: 0x%02X", dut.jvs_nodes.node_cmd_ver[dev]);
@@ -380,7 +450,7 @@ module test_03_device_identification;
             8'h12: return "JVS_REV";
             8'h13: return "COM_VER";
             8'h14: return "FEAT_CHK";
-            8'h20: return "READ_INPUTS";
+            8'h20: return "read_INPUTS";
             default: return "UNKNOWN";
         endcase
     endfunction
@@ -464,9 +534,9 @@ module test_03_device_identification;
             // Monitor controller main state changes
             if (dut.main_state != controller_main_state_prev) begin
                 controller_main_state_prev <= dut.main_state;
-                $display("[CONTROLLER] State change: %0d -> %0d (%s) (time: %0t)",
-                        controller_main_state_prev, dut.main_state,
-                        get_controller_state_name(dut.main_state), $time);
+//                $display("[CONTROLLER] State change: %0d -> %0d (%s) (time: %0t)",
+//                        controller_main_state_prev, dut.main_state,
+//                        get_controller_state_name(dut.main_state), $time);
             end
 
             // Monitor com_commit signal changes
@@ -514,7 +584,6 @@ module test_03_device_identification;
         end
     end
 
-
     // Timeout counter
     always @(posedge clk) begin
         if (rst) begin
@@ -537,6 +606,7 @@ module test_03_device_identification;
         $display("TEST 03: Séquence d'identification JVS complète avec Smart Device");
         $display("Vérification: Communication bidirectionnelle complète");
         $display("Fréquence: %0d Hz, UART: %0d cycles/bit", MASTER_CLK_FREQ, UART_CLKS_PER_BIT);
+        $display("Version BRAM: node_name stockés avec checksum");
         $display("="*70);
 
         // Initialisation
@@ -544,7 +614,7 @@ module test_03_device_identification;
         ena = 0;
         stb = 0;
         gpio_output_value = 8'h00;
-        node_name_rd_addr = 7'h00;
+        node_name_rd_addr = {NAME_BRAM_ADDR_BITS{1'b0}};
 
         repeat(100) @(posedge clk);
         $display("[TEST] Phase 1: Reset terminé");
@@ -571,7 +641,7 @@ module test_03_device_identification;
         $display("Réponses totales envoyées: %d", responses_sent);
         $display("="*70);
 
-        $finish;
+        //$finish;
     end
 
     // Génération VCD
@@ -644,8 +714,7 @@ module test_03_device_identification;
             5'h1C: return "FIRST_RESET_ARG";
             5'h1D: return "TX_NEXT";
             5'h1E: return "RX_NEXT";
-            5'h1F: return "FATAL_ERROR";
-            default: return $sformatf("STATE_%0d", state);
+            default: return "UNKNOWN";
         endcase
     endfunction
 

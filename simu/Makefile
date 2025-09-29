@@ -26,24 +26,29 @@ WORK_LIB = work
 
 # Sources nécessaires
 SOURCES = ../rtl/jvs_node_info_pkg.sv \
-          ../jvscom/uart_tx.v \
-          ../jvscom/uart_rx.v \
+          ../uart_tx.v \
+          ../uart_rx.v \
           ../jvs_controller.sv \
           fake_jvs_device.sv
 
 # Sources pour tests avancés avec Smart Device
-SMART_SOURCES = ../rtl/jvs_node_info_pkg.sv \
-                ../jvscom/uart_tx.v \
-                ../jvscom/uart_rx.v \
-                ../jvscom/jvs_com.sv \
-                ../jvs_controller.sv \
+SMART_SOURCES = ../rtl/jvs_defs_pkg.sv \
+                ../rtl/jvs_node_info_pkg.sv \
+                jvs_com_pkg.sv \
+                ../uart_tx.v \
+                ../uart_rx.v \
+                ../jvs_com.sv \
+                jvs_com_wrapper.sv \
+                ../jvs_ctrl.sv \
                 smart_jvs_device.sv
 
 # Sources pour tests avec l'ancien controller refactorisé
 REFACTOR_SOURCES = ../rtl/jvs_node_info_pkg.sv \
-                   ../jvscom/uart_tx.v \
-                   ../jvscom/uart_rx.v \
-                   ../jvscom/jvs_com.sv \
+                   jvs_com_pkg.sv \
+                   ../uart_tx.v \
+                   ../uart_rx.v \
+                   ../jvs_com.sv \
+                   jvs_com_wrapper.sv \
                    ../jvs_controller.sv.to_refactor \
                    smart_jvs_device.sv
 
@@ -74,7 +79,7 @@ test_02: setup
 	$(VSIM) -c -do "run -all; quit" $(WORK_LIB).test_02_address_assignment
 
 test_03: setup
-	@echo "=== Compilation du Test 03: Device Identification with Smart JVS ==="
+	@echo "=== Compilation du Test 03: Device Identification avec Smart JVS et API BRAM ==="
 	$(VLOG) $(VLOG_FLAGS) -work $(WORK_LIB) $(SMART_SOURCES) test_03_device_identification.sv
 	@echo "=== Exécution du Test 03 ==="
 	$(VSIM) -c -do "run -all; quit" $(WORK_LIB).test_03_device_identification
@@ -105,7 +110,7 @@ help:
 	@echo "Targets disponibles:"
 	@echo "  test_01         - Test de trame reset UART (optimisé 250kHz)"
 	@echo "  test_02         - Test de séquence d'assignation d'adresse (optimisé 250kHz)"
-	@echo "  test_03         - Test d'identification JVS complète avec Smart Device"
+	@echo "  test_03         - Test d'identification JVS complète avec Smart Device et API BRAM"
 	@echo "  test_03_refactor- Test 03 avec l'ancien controller refactorisé"
 	@echo "  test_01_gui     - Test 01 avec interface graphique Modelsim"
 	@echo "  test_01_wave    - Test 01 avec génération de waveform"
