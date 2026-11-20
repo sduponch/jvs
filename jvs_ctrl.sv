@@ -74,17 +74,35 @@ module jvs_ctrl #(
     output logic [4*16-1:0] coin_status,
     
     // Digital output from SNAC
-    input logic [15:0] output_digital_ch1, // Digital output channel 1 from SNAC
+    // Digital outputs of each player, OUTPUT1 (32) data: byte 1 = [7:0], byte 2 = [15:8],
+    // byte 3 = [23:16]. Each node receives the OR of the outputs of its own players (players
+    // numbered across the chained nodes, as player1..4_input_switch)
+    input logic [23:0] p1_output_digital,
+    input logic [23:0] p2_output_digital,
+    input logic [23:0] p3_output_digital,
+    input logic [23:0] p4_output_digital,
     // Analog outputs sent with ANLOUT (33): channel c at [c*16 +: 16] (8 channels max,
     // channels declared beyond 8 are sent as 0)
     input logic [8*16-1:0] output_analog,
+    // Node receiving OUTPUT1 (32) / ANLOUT (33): node address (1 = first node), 0 = every
+    // node declaring outputs
+    input logic [7:0] output_node,
 
     //JVS node information structure
     output logic jvs_data_ready,
     output jvs_node_info_t jvs_nodes,
     //RAM interface for node names (for debug/display purposes)
     output logic [7:0] node_name_rd_data,
-    input logic [jvs_node_info_pkg::NAME_BRAM_ADDR_BITS-1:0] node_name_rd_addr  // Calculated address width based on BRAM size
+    input logic [jvs_node_info_pkg::NAME_BRAM_ADDR_BITS-1:0] node_name_rd_addr,  // Calculated address width based on BRAM size
+
+    // Vendor init table (256 bytes, owned and filled by the integration, e.g. from a file on
+    // the SD card), read here with a registered address: data valid 2 cycles later.
+    //   [2(n-1)], [2(n-1)+1] : node n (1..8) MAINID pointer, vendor frames pointer (00 = NULL)
+    //   MAINID entry  : 00 terminated string, sent as MAINID (15) <string> 00
+    //   vendor entry  : frames [L][L bytes: command + data] ... [00], one JVS frame each
+    // Sent after the feature check of the node; answers are not parsed (no answer: go on).
+    output logic [7:0] vendor_rd_addr,
+    input  logic [7:0] vendor_rd_data
 ); 
 
     localparam UART_CLKS_PER_BIT = MASTER_CLK_FREQ / 115200;
@@ -322,6 +340,7 @@ module jvs_ctrl #(
     localparam RX_PARSE_JVSREV = 6'h0F;     // Parse JVS revision response (BCD format)
     localparam STATE_SEND_COMMVER = 6'h10;     // Send communications version request (13)
     localparam STATE_SEND_FEATCHK = 6'h11;     // Send feature check request (14)
+    localparam STATE_VENDOR = 6'h2F;           // Vendor init after FEATCHK (sub-steps: vendor_phase)
     
     // GENERIC FLOW CONTROL STATES
     localparam STATE_WAIT_RX = 6'h01;          // Wait for device response with 1s timeout
@@ -430,6 +449,29 @@ module jvs_ctrl #(
     jvs_node_info_t jvs_nodes_r;
 
     logic [7:0] dout_outputs, dout_bytes;
+    logic [7:0] swinp_bytes;         // SWINP data bytes per player of the current node
+    logic [23:0] node_output_digital; // OUTPUT1 data of the current node (its players outputs)
+
+    // Vendor init (see the vendor_rd_* ports)
+    typedef enum logic [3:0] {
+        V_HDR_MAINID, V_HDR_VENDOR, V_HDR_DONE,  // read the node pointers
+        V_MAINID_CMD, V_MAINID_BYTE,             // MAINID frame: command, string bytes
+        V_FRAMES, V_FRAME_LEN, V_FRAME_BYTE,     // vendor frames: length, bytes
+        V_COMMIT, V_DONE, V_WAIT
+    } vendor_phase_t;
+    vendor_phase_t vendor_phase, vendor_wait_phase, vendor_after_rx;
+    logic [1:0] vendor_wait;         // table read latency
+    logic       vendor_active;       // a vendor frame is waiting for its answer
+    logic [7:0] vendor_node;         // node address being initialized
+    logic [5:0] vendor_next_state;   // init state to resume when done
+    logic [7:0] vendor_ptr;          // current table read address
+    logic [7:0] vendor_frames_ptr;   // node vendor frames pointer
+    logic [7:0] vendor_len, vendor_cnt;
+    localparam logic [7:0] VENDOR_MAINID_MAX = 8'd100;  // MAINID string bound (with the 00)
+    // Pause after each vendor frame answer: the Namco NA-JV ignored command 70 sent 0.5 ms
+    // after its MAINID answer (the Time Crisis 4 host waits ~80 ms between init frames)
+    localparam logic [31:0] VENDOR_FRAME_DELAY = MASTER_CLK_FREQ / 100;   // 10 ms
+    logic       output_node_match;   // current node receives OUTPUT1 / ANLOUT (see output_node)
 
 //see comments in JVS_Debugger.qsf under [JVS project settings] 
 `ifdef USE_DUMMY_JVS_DATA
@@ -462,7 +504,9 @@ module jvs_ctrl #(
         node_char_display_width: '{8'h00, 8'h00}, // No character display width
         node_char_display_height: '{8'h00, 8'h00}, // No character display height
         node_char_display_type: '{8'h00, 8'h00},   // No character display type
-        node_has_backup: '{1'b0, 1'b0}            // No backup support
+        node_has_backup: '{1'b0, 1'b0},           // No backup support
+        node_mainid_ptr: '{8'h00, 8'h00},         // No vendor init
+        node_vendor_ptr: '{8'h00, 8'h00}
     };
     assign jvs_nodes = jvs_nodes_r2;
 `else 
@@ -566,6 +610,11 @@ module jvs_ctrl #(
             jvs_nodes_r.player_count <= 4'h0; // Accumulated during feature parsing: must restart from 0 on re-init
             current_device_addr <= 8'h01;    // Standard JVS device address
             polling_mode <= 1'b0;             // Start in initialization mode
+            vendor_active <= 1'b0;
+            vendor_phase <= V_HDR_MAINID;
+            vendor_rd_addr <= 8'h00;
+            jvs_nodes_r.node_mainid_ptr[0] <= 8'h00;
+            jvs_nodes_r.node_vendor_ptr[0] <= 8'h00;
             // Initialize JVS node information (single node only)
             jvs_nodes_r.node_id[0] <= 8'h01;
             jvs_nodes_r.node_cmd_ver[0] <= 8'h00;
@@ -1133,6 +1182,115 @@ module jvs_ctrl #(
                     end
                 end
 
+                //-------------------------------------------------------------
+                // VENDOR INIT: MAINID string and vendor specific frames of the node, read from
+                // the vendor table (vendor_rd_* ports). Nothing is sent for NULL pointers.
+                //-------------------------------------------------------------
+                STATE_VENDOR: begin
+                    return_state <= STATE_VENDOR;
+                    case (vendor_phase)
+                        V_WAIT: begin                   // table read latency
+                            if (vendor_wait != 0) vendor_wait <= vendor_wait - 2'd1;
+                            else vendor_phase <= vendor_wait_phase;
+                        end
+                        V_HDR_MAINID: begin
+                            vendor_rd_addr <= {vendor_node[6:0] - 7'd1, 1'b0};
+                            vendor_wait <= 2'd1; vendor_wait_phase <= V_HDR_VENDOR; vendor_phase <= V_WAIT;
+                        end
+                        V_HDR_VENDOR: begin
+                            vendor_ptr <= vendor_rd_data;                       // MAINID pointer
+                            jvs_nodes_r.node_mainid_ptr[vendor_node - 1] <= vendor_rd_data;
+                            vendor_rd_addr <= {vendor_node[6:0] - 7'd1, 1'b1};
+                            vendor_wait <= 2'd1; vendor_wait_phase <= V_HDR_DONE; vendor_phase <= V_WAIT;
+                        end
+                        V_HDR_DONE: begin
+                            vendor_frames_ptr <= vendor_rd_data;
+                            jvs_nodes_r.node_vendor_ptr[vendor_node - 1] <= vendor_rd_data;
+                            vendor_phase <= (vendor_ptr != 8'h00) ? V_MAINID_CMD : V_FRAMES;
+                        end
+                        V_MAINID_CMD: if (com_tx_ready) begin
+                            com_dst_node <= vendor_node;
+                            com_tx_data <= CMD_MAINID;
+                            com_tx_cmd_push <= 1'b1;
+                            vendor_cnt <= 8'd0;
+                            vendor_rd_addr <= vendor_ptr;
+                            vendor_wait <= 2'd1; vendor_wait_phase <= V_MAINID_BYTE; vendor_phase <= V_WAIT;
+                            main_state <= STATE_TX_NEXT;
+                        end
+                        V_MAINID_BYTE: if (com_tx_ready) begin
+                            // string bytes up to and including the 00 terminator
+                            com_tx_data <= (vendor_cnt == VENDOR_MAINID_MAX - 1) ? 8'h00 : vendor_rd_data;
+                            com_tx_data_push <= 1'b1;
+                            vendor_cnt <= vendor_cnt + 8'd1;
+                            vendor_ptr <= vendor_ptr + 8'd1;
+                            vendor_rd_addr <= vendor_ptr + 8'd1;
+                            if (vendor_rd_data == 8'h00 || vendor_cnt == VENDOR_MAINID_MAX - 1) begin
+                                vendor_after_rx <= V_FRAMES;
+                                vendor_phase <= V_COMMIT;
+                            end else begin
+                                vendor_wait <= 2'd1; vendor_wait_phase <= V_MAINID_BYTE; vendor_phase <= V_WAIT;
+                            end
+                            main_state <= STATE_TX_NEXT;
+                        end
+                        V_FRAMES: begin                 // start of the vendor frames
+                            if (vendor_frames_ptr == 8'h00) vendor_phase <= V_DONE;
+                            else begin
+                                vendor_ptr <= vendor_frames_ptr;
+                                vendor_rd_addr <= vendor_frames_ptr;
+                                vendor_wait <= 2'd1; vendor_wait_phase <= V_FRAME_LEN; vendor_phase <= V_WAIT;
+                            end
+                        end
+                        V_FRAME_LEN: begin              // vendor_rd_data = L at vendor_ptr
+                            if (vendor_rd_data == 8'h00 || vendor_ptr == 8'hFF) vendor_phase <= V_DONE;
+                            else begin
+                                vendor_len <= vendor_rd_data;
+                                vendor_cnt <= 8'd0;
+                                vendor_ptr <= vendor_ptr + 8'd1;
+                                vendor_rd_addr <= vendor_ptr + 8'd1;
+                                vendor_wait <= 2'd1; vendor_wait_phase <= V_FRAME_BYTE; vendor_phase <= V_WAIT;
+                            end
+                        end
+                        V_FRAME_BYTE: if (com_tx_ready) begin
+                            // first byte: command, then data bytes
+                            if (vendor_cnt == 8'd0) begin
+                                com_dst_node <= vendor_node;
+                                com_tx_cmd_push <= 1'b1;
+                            end else
+                                com_tx_data_push <= 1'b1;
+                            com_tx_data <= vendor_rd_data;
+                            vendor_cnt <= vendor_cnt + 8'd1;
+                            vendor_ptr <= vendor_ptr + 8'd1;
+                            vendor_rd_addr <= vendor_ptr + 8'd1;
+                            if (vendor_cnt + 8'd1 == vendor_len || vendor_ptr == 8'hFF) begin
+                                vendor_after_rx <= V_FRAME_LEN;   // next frame length at vendor_ptr
+                                vendor_phase <= V_COMMIT;
+                            end else begin
+                                vendor_wait <= 2'd1; vendor_wait_phase <= V_FRAME_BYTE; vendor_phase <= V_WAIT;
+                            end
+                            main_state <= STATE_TX_NEXT;
+                        end
+                        V_COMMIT: if (com_tx_ready) begin
+                            // send the frame; any answer / error / timeout resumes at vendor_after_rx
+                            com_commit <= 1'b1;
+                            cmd_pos <= 8'd0;
+                            vendor_active <= 1'b1;
+                            timeout_counter <= RX_TIMEOUT_COUNT;
+                            on_timeout_state <= STATE_VENDOR;
+                            vendor_rd_addr <= vendor_ptr;          // V_FRAME_LEN reads it on return
+                            vendor_phase <= vendor_after_rx;
+                            main_state <= STATE_WAIT_RX;
+                        end
+                        V_DONE: begin
+                            vendor_active <= 1'b0;
+                            vendor_phase <= V_HDR_MAINID;
+                            delay_counter <= FEATURES_TO_IDLE_DELAY;
+                            return_state <= vendor_next_state;
+                            main_state <= STATE_MAIN_TIMER_DELAY;
+                        end
+                        default: vendor_phase <= V_DONE;
+                    endcase
+                end
+
                 RX_PARSE_FEATURES: begin
                     $display("RX_PARSE_FEATURES");
                     return_state <= RX_PARSE_FEATURES;
@@ -1192,13 +1350,19 @@ module jvs_ctrl #(
                                         jvs_nodes_r.node_char_display_height[current_device_addr] <= 8'h0;
                                         jvs_nodes_r.node_char_display_type[current_device_addr] <= 8'h0;
                                         jvs_nodes_r.node_has_backup[current_device_addr] <= 1'b0;
+                                        jvs_nodes_r.node_mainid_ptr[current_device_addr] <= 8'h00;
+                                        jvs_nodes_r.node_vendor_ptr[current_device_addr] <= 8'h00;
 
                                         current_device_addr <= current_device_addr + 1;
                                     end
 
-                                    // Add delay before going to configured success state
+                                    // Vendor init of this node (table pointers), then the
+                                    // configured success state
+                                    vendor_node <= current_device_addr;   // before the increment above
+                                    vendor_next_state <= on_success_state;
+                                    vendor_phase <= V_HDR_MAINID;
                                     delay_counter <= FEATURES_TO_IDLE_DELAY;
-                                    return_state <= on_success_state;
+                                    return_state <= STATE_VENDOR;
                                     main_state <= STATE_MAIN_TIMER_DELAY;
                                 end else begin
                                     // Store function code and continue
@@ -1570,12 +1734,13 @@ module jvs_ctrl #(
                 //-------------------------------------------------------------
                 // GENERAL PURPOSE OUTPUT 1 (32): [32] [byte count N] [N data bytes]
                 // N = ceil(digital outputs / 8) (1..3). Output bits: first data byte bit 7
-                // = output 1. output_digital_ch1[7:0] -> data byte 1 (outputs 1-8),
-                // output_digital_ch1[15:8] -> data byte 2 (outputs 9-16), byte 3 = 0.
-                // Sent to every node declaring digital outputs.
+                // = output 1. Data = node_output_digital (OR of pN_output_digital of the node
+                // players): [7:0] -> data byte 1 (outputs 1-8), [15:8] -> byte 2, [23:16] -> byte 3.
+                // Sent to the node selected by output_node (every node declaring digital
+                // outputs when 0).
                 //-------------------------------------------------------------
                 STATE_SEND_OUTPUT_DIGITAL: begin // (CMD_OUTPUT1) @TODO: (CMD_OUTPUT2),(CMD_OUTPUT3)
-                    if (jvs_nodes_r.node_digital_outputs[current_device_addr - 1] > 0) begin
+                    if (jvs_nodes_r.node_digital_outputs[current_device_addr - 1] > 0 && output_node_match) begin
                         if (com_tx_ready) begin
                             if (cmd_pos == 0) begin
                                 com_dst_node <= current_device_addr;
@@ -1595,9 +1760,9 @@ module jvs_ctrl #(
                                 3'd2, 3'd3, 3'd4: begin
                                     if (cmd_pos - 2 < dout_bytes) begin
                                         case (cmd_pos)
-                                            3'd2:    com_tx_data <= output_digital_ch1[7:0];
-                                            3'd3:    com_tx_data <= output_digital_ch1[15:8];
-                                            default: com_tx_data <= 8'h00;
+                                            3'd2:    com_tx_data <= node_output_digital[7:0];
+                                            3'd3:    com_tx_data <= node_output_digital[15:8];
+                                            default: com_tx_data <= node_output_digital[23:16];
                                         endcase
                                         com_tx_data_push <= 1'b1;
                                         main_state <= STATE_TX_NEXT;
@@ -1627,7 +1792,7 @@ module jvs_ctrl #(
                 //-------------------------------------------------------------
                 STATE_SEND_OUTPUT_ANALOG: begin // (CMD_ANLOUT)
                     // Check if device has analog outputs
-                    if (jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] > 0) begin
+                    if (jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] > 0 && output_node_match) begin
                         if(com_tx_ready) begin
                                // Initialize command parameters on first entry
                                 if (cmd_pos == 0) begin
@@ -1988,8 +2153,8 @@ module jvs_ctrl #(
                                         end
                                     end
                                     3'd1: begin
-                                        // Dispatch to specialized SCRPOSINP state for screen position parsing
-                                        cmd_pos <= 0;
+                                        // com_rx_byte = X MSB: same entry as ANLINP (cmd_pos stays 1,
+                                        // it was reset to 0 here and the parser dropped the X MSB)
                                         return_state <= RX_PARSE_SCRPOSINP;
                                         main_state <= RX_PARSE_SCRPOSINP;
                                     end
@@ -2101,6 +2266,8 @@ module jvs_ctrl #(
                         return_state <= RX_PARSE_INPUT_CMD;
                         main_state <= STATE_MAIN_TIMER_DELAY;
                     end else begin
+                        // Bytes 1 and 2 of the player are mapped; any further byte (more than 16
+                        // switches, e.g. 24 for the Namco NA-JV) is read and ignored
                         case (global_player + current_player)
                             4'd0: begin // Player 1
                                 if (cmd_pos == 1) begin
@@ -2114,15 +2281,11 @@ module jvs_ctrl #(
                                     player1_input_switch[4]  <= com_rx_byte[1];  // A (push1)
                                     player1_input_switch[5]  <= com_rx_byte[0];  // B (push2)
 
-                                    if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
-                                        // Only 1 byte per player, clear unused bits and advance to next player
+                                    if (swinp_bytes <= 1) begin
+                                        // Only 1 byte per player: clear the bits of the 2nd byte
                                         player1_input_switch[13:6] <= 8'b00000000;
-                                        current_player <= current_player + 1;
-                                        cmd_pos <= 0;
                                     end
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
-                                end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
+                                end else if (cmd_pos == 2) begin
                                     // Second player data byte (additional buttons)
                                     player1_input_switch[6] <= com_rx_byte[7];   // X (push3)
                                     player1_input_switch[7] <= com_rx_byte[6];   // Y (push4)
@@ -2132,11 +2295,6 @@ module jvs_ctrl #(
                                     player1_input_switch[11] <= com_rx_byte[2];  // push8 -> R2
                                     player1_input_switch[12] <= com_rx_byte[1];  // push9 -> L3
                                     player1_input_switch[13] <= com_rx_byte[0];  // push10 -> R3
-                                    // Advance to next player
-                                    current_player <= current_player + 1;
-                                    cmd_pos <= 0; // Reset for next player
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
                                 end
                             end
 
@@ -2152,15 +2310,11 @@ module jvs_ctrl #(
                                     player2_input_switch[4]  <= com_rx_byte[1];  // A (push1)
                                     player2_input_switch[5]  <= com_rx_byte[0];  // B (push2)
 
-                                    if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
-                                        // Only 1 byte per player, clear unused bits and advance to next player
+                                    if (swinp_bytes <= 1) begin
+                                        // Only 1 byte per player: clear the bits of the 2nd byte
                                         player2_input_switch[13:6] <= 8'b00000000;
-                                        current_player <= current_player + 1;
-                                        cmd_pos <= 0;
                                     end
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
-                                end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
+                                end else if (cmd_pos == 2) begin
                                     // Second player data byte (additional buttons) - match your reference bit mapping
                                     player2_input_switch[6] <= com_rx_byte[7];   // X (push3)
                                     player2_input_switch[7] <= com_rx_byte[6];   // Y (push4)
@@ -2170,11 +2324,6 @@ module jvs_ctrl #(
                                     player2_input_switch[11] <= com_rx_byte[2];  // push8 -> R2
                                     // Clear unused upper bits for consistency with reference
                                     player2_input_switch[13:12] <= 2'b00;
-                                    // Advance to next player
-                                    current_player <= current_player + 1;
-                                    cmd_pos <= 0; // Reset for next player
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
                                 end
                             end
 
@@ -2190,15 +2339,11 @@ module jvs_ctrl #(
                                     player3_input_switch[4]  <= com_rx_byte[1];  // A (push1)
                                     player3_input_switch[5]  <= com_rx_byte[0];  // B (push2)
 
-                                    if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
-                                        // Only 1 byte per player, clear unused bits and advance to next player
+                                    if (swinp_bytes <= 1) begin
+                                        // Only 1 byte per player: clear the bits of the 2nd byte
                                         player3_input_switch[13:6] <= 8'b00000000;
-                                        current_player <= current_player + 1;
-                                        cmd_pos <= 0;
                                     end
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
-                                end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
+                                end else if (cmd_pos == 2) begin
                                     // Second player data byte (additional buttons)
                                     player3_input_switch[6] <= com_rx_byte[7];   // X (push3)
                                     player3_input_switch[7] <= com_rx_byte[6];   // Y (push4)
@@ -2208,11 +2353,6 @@ module jvs_ctrl #(
                                     player3_input_switch[11] <= com_rx_byte[2];  // push8 -> R2
                                     // Clear unused upper bits for consistency
                                     player3_input_switch[13:12] <= 2'b00;
-                                    // Advance to next player
-                                    current_player <= current_player + 1;
-                                    cmd_pos <= 0; // Reset for next player
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
                                 end
                             end
 
@@ -2228,15 +2368,11 @@ module jvs_ctrl #(
                                     player4_input_switch[4]  <= com_rx_byte[1];  // A (push1)
                                     player4_input_switch[5]  <= com_rx_byte[0];  // B (push2)
 
-                                    if (jvs_nodes_r.node_buttons[current_device_addr - 1] <= 8) begin
-                                        // Only 1 byte per player, clear unused bits and advance to next player
+                                    if (swinp_bytes <= 1) begin
+                                        // Only 1 byte per player: clear the bits of the 2nd byte
                                         player4_input_switch[13:6] <= 8'b00000000;
-                                        current_player <= current_player + 1;
-                                        cmd_pos <= 0;
                                     end
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
-                                end else if (cmd_pos == 2 && jvs_nodes_r.node_buttons[current_device_addr - 1] > 8) begin
+                                end else if (cmd_pos == 2) begin
                                     // Second player data byte (additional buttons)
                                     player4_input_switch[6] <= com_rx_byte[7];   // X (push3)
                                     player4_input_switch[7] <= com_rx_byte[6];   // Y (push4)
@@ -2246,14 +2382,17 @@ module jvs_ctrl #(
                                     player4_input_switch[11] <= com_rx_byte[2];  // push8 -> R2
                                     // Clear unused upper bits for consistency
                                     player4_input_switch[13:12] <= 2'b00;
-                                    // Advance to next player
-                                    current_player <= current_player + 1;
-                                    cmd_pos <= 0; // Reset for next player
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
                                 end
                             end
                         endcase
+                        // Bytes per player = ceil(switches / 8) (swinp_bytes): next player after
+                        // the last one (cmd_pos goes back to 1 through RX_NEXT)
+                        if (cmd_pos >= swinp_bytes) begin
+                            current_player <= current_player + 1;
+                            cmd_pos <= 0;
+                        end
+                        main_state <= STATE_RX_NEXT;
+                        com_rx_next <= 1'b1;
                     end
                 end
 
@@ -2455,8 +2594,9 @@ module jvs_ctrl #(
                             end
                             8'd3: begin // Y coordinate low byte
                                 screen_pos_y[7:0] <= com_rx_byte;
-                                // Screen position parsing complete, advance to next command
-                                cmd_pos <= 0;
+                                // Screen position parsing complete, advance to next command:
+                                // RX_NEXT brings cmd_pos back to 0 on the next REPORT byte
+                                cmd_pos <= 8'hFF;
                                 com_src_cmd_next <= 1'b1;
                                 return_state <= RX_PARSE_INPUT_CMD;
                                 main_state <= STATE_RX_NEXT;
@@ -2549,6 +2689,14 @@ module jvs_ctrl #(
                             timeout_retry_count <= 8'h00;  // Reset retry count on success
                             // STATUS OK, dispatch to appropriate parser
                             cmd_pos <= 8'd0;
+                            if (vendor_active) begin
+                                // vendor frame answered: not parsed, next vendor step after a pause
+                                vendor_active <= 1'b0;
+                                com_src_cmd_next <= 1'b1;
+                                delay_counter <= VENDOR_FRAME_DELAY;
+                                return_state <= STATE_VENDOR;
+                                main_state <= STATE_MAIN_TIMER_DELAY;
+                            end else
                             case (com_src_cmd)
                                 CMD_SETADDR: main_state <= RX_PARSE_SETADDR;
                                 CMD_IOIDENT: main_state <= RX_PARSE_IOIDENT;
@@ -2563,6 +2711,13 @@ module jvs_ctrl #(
                             endcase
                         end else begin
                             // STATUS error, log and retry
+                            if (vendor_active) begin
+                                vendor_active <= 1'b0;
+                                com_src_cmd_next <= 1'b1;
+                                delay_counter <= VENDOR_FRAME_DELAY;
+                                return_state <= STATE_VENDOR;     // vendor init goes on
+                                main_state <= STATE_MAIN_TIMER_DELAY;
+                            end else
                             case (com_src_cmd)
                                 CMD_SETADDR: main_state <= STATE_FIRST_RESET;    // Critical - restart sequence
                                 CMD_IOIDENT: main_state <= STATE_SEND_IOIDENT;     // Retry ID read
@@ -2582,6 +2737,7 @@ module jvs_ctrl #(
                         if (timeout_retry_count != 8'hFF)
                             timeout_retry_count <= timeout_retry_count + 1;
                         main_state <= on_timeout_state;
+                        vendor_active <= 1'b0;       // vendor frame without answer: go on
                         // The commands of the unanswered frame stay in the jvs_com command
                         // FIFO: a later answer would be parsed with them (and the FIFO ends
                         // up full). Drop them.
@@ -2759,6 +2915,24 @@ module jvs_ctrl #(
 
     // OUTPUT1 (32) data byte count for the current node: ceil(outputs / 8), limited to 1..3
     assign dout_outputs = jvs_nodes_r.node_digital_outputs[current_device_addr - 1];
+    assign swinp_bytes = (jvs_nodes_r.node_buttons[current_device_addr - 1] + 8'd7) >> 3;
+
+    // OUTPUT1 data of the current node: OR of the digital outputs of its players. Its first
+    // player is the sum of the players of the previous nodes (same numbering as the inputs).
+    always_comb begin : node_output_comb
+        logic [4:0] first, count;
+        logic [23:0] p_out [4];
+        p_out[0] = p1_output_digital; p_out[1] = p2_output_digital;
+        p_out[2] = p3_output_digital; p_out[3] = p4_output_digital;
+        first = 5'd0;
+        for (int n = 0; n < jvs_node_info_pkg::MAX_JVS_NODES; n++)
+            if (n < current_device_addr - 1) first = first + jvs_nodes_r.node_players[n];
+        count = jvs_nodes_r.node_players[current_device_addr - 1];
+        node_output_digital = 24'h000000;
+        for (int p = 0; p < 4; p++)
+            if (p >= first && p < first + count) node_output_digital = node_output_digital | p_out[p];
+    end
+    assign output_node_match = (output_node == 8'd0) || (output_node == current_device_addr);
     assign dout_bytes   = (dout_outputs > 8'd16) ? 8'd3 : (dout_outputs > 8'd8) ? 8'd2 : 8'd1;
 
     //=========================================================================
@@ -2783,6 +2957,7 @@ module jvs_ctrl #(
                 STATE_SEND_JVSREV,
                 STATE_SEND_COMMVER,
                 STATE_SEND_FEATCHK:  bus_phase <= JVS_INIT;
+                STATE_VENDOR:        bus_phase <= JVS_INIT;
                 STATE_SEND_INPUTS:   bus_phase <= JVS_READY;
                 STATE_LINK_LOST:     bus_phase <= JVS_LINK_LOST;
                 default:             bus_phase <= bus_phase;

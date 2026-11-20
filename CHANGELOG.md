@@ -47,6 +47,24 @@ All notable changes to the JVS protocol implementation will be documented in thi
 - ANLOUT (33): `output_analog` input on `jvs_ctrl` (8 x 16-bit channels), sent to every
   node declaring analog outputs with the declared channel count (e.g. the cabinet top
   light ramp driven by NAOMI hosts on channel 1)
+- Vendor init table (`vendor_rd_addr` / `vendor_rd_data` ports, 256 bytes owned by the
+  integration): per node a MAINID pointer and a vendor frames pointer (00 = NULL). After the
+  feature check the controller sends MAINID (15) <string> 00 and the vendor frames
+  ([L][command + data]...[00]) of the node, 10 ms apart (the NA-JV ignores a frame sent
+  0.5 ms after the previous answer); answers are not parsed. Nothing vendor specific
+  in the RTL: e.g. the Namco NA-JV (Time Crisis 4) only drives its outputs after MAINID
+  "namco ltd.;S246;VerA;JPN" and `70 18 50 4C 14 40`, given by the table.
+  `scripts/jvs_vendor.py` builds the table; `make smart_namco` (part of `make regression`)
+  checks both frames with the TC4 table, the generic test checks that an empty table sends
+  nothing
+- `output_digital_ch1` replaced by `p1_output_digital` ... `p4_output_digital` (24 bits:
+  the 3rd OUTPUT1 data byte is sent, was always 00): each node receives in OUTPUT1 the OR
+  of the outputs of its own players (players numbered across the chained nodes, as the
+  switch inputs).
+  `scripts/jvs_vendor.py` can add a digital output profile to the table (`--dout-base`,
+  `--dout-recoil-mask`), used by the core for OUTPUT1 and the gun recoil bits
+- `output_node` input on `jvs_ctrl`: OUTPUT1 / ANLOUT sent only to the given node
+  address (0 = every node declaring outputs, previous behaviour)
 - Simulation: the smart device model checks the OUTPUT1 / ANLOUT data it receives, escapes
   its answers and decodes escaped requests per the spec (analog CH7 = E0D0 and ANLOUT
   channel 0 = E000 exercise both directions)
@@ -68,6 +86,20 @@ All notable changes to the JVS protocol implementation will be documented in thi
 - `jvs_com` TX escape: a data byte equal to E0 or D0 stalled the transmitter (it waited
   for a BRAM read already consumed). Now sent as D0 DF / D0 CF with the checksum computed
   on the unescaped byte, as required by the spec
+- Polling stopped after the feature check with the Namco NA-JV (Time Crisis 4), the
+  controller ended in STATE_FATAL_ERROR:
+  - SCRPOSINP (25): the dispatcher reset cmd_pos before the parser, which dropped the
+    X MSB and read the next REPORT byte as Y LSB, then resumed one byte too far
+  - SWINP (20) with more than 16 buttons per player (3 bytes, 24 buttons): the 3rd byte
+    was read as the next command's REPORT byte. Extra bytes are now skipped
+  - The smart device model declares a screen position channel and 24 buttons per player
+    (distinctive 3rd bytes, Y = 87D0 escaped) to cover both cases
+- `jvs_bus_logger` `full` output is registered: the combinational compare, read from the
+  core clock domain, could glitch when the entry counter changed several bits at once and
+  trigger the auto save of an incomplete init capture (14336 entries instead of 16380)
+- `jvs_dump.py` labelled every ring capture as a sniffer capture (the debugger also uses
+  the ring buffer once its init capture is saved): sniffer captures are now recognized by
+  the absence of TX / DIR entries
 - `jvs_com` port widths used localparams declared later in the module (rejected by Questa)
 - No recovery after answer timeouts: the commands of unanswered frames stayed in the
   `jvs_com` command FIFO (later answers parsed with the wrong commands, FIFO eventually

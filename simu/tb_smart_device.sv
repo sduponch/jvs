@@ -47,6 +47,7 @@ module tb_smart_device;
     wire [15:0] p1_btn_state, p2_btn_state, p3_btn_state, p4_btn_state;
     wire [31:0] p1_joy_state, p2_joy_state;
     wire [15:0] screen_pos_x, screen_pos_y;
+    logic [7:0] vendor_rd_addr, vendor_rd_data;   // vendor init table (see vendor_mem)
     wire has_screen_pos;
     wire jvs_data_ready;
     jvs_node_info_t jvs_nodes;
@@ -138,14 +139,22 @@ module tb_smart_device;
         .node_analog(node_analog),
         .coin_count(), .coin1(), .coin2(), .coin3(), .coin4(),
         .coin_status(coin_status),
-        .output_digital_ch1(TEST_DOUT),
+        // node 1 has 2 players: OUTPUT1 = P1 | P2 = TEST_DOUT; P3 / P4 (no such player on the
+        // node) must not reach it
+        .p1_output_digital({16'h0000, TEST_DOUT[7:0]}),
+        .p2_output_digital({8'h00, TEST_DOUT[15:8], 8'h00}),
+        .p3_output_digital(24'hFFFFFF),
+        .p4_output_digital(24'hFFFFFF),
+        .output_node(8'd0),                     // every node
         .output_analog({96'h0, TEST_AOUT1, TEST_AOUT0}),
-        .has_screen_pos(), .screen_pos_x(), .screen_pos_y(),
+        .has_screen_pos(has_screen_pos), .screen_pos_x(screen_pos_x), .screen_pos_y(screen_pos_y),
         //.gpio_output_value(gpio_output_value),
         .jvs_data_ready(jvs_data_ready),
         .jvs_nodes(jvs_nodes),
         .node_name_rd_data(node_name_rd_data),
-        .node_name_rd_addr(node_name_rd_addr)
+        .node_name_rd_addr(node_name_rd_addr),
+        .vendor_rd_addr(vendor_rd_addr),
+        .vendor_rd_data(vendor_rd_data)
     );
 
     //=========================================================================
@@ -165,7 +174,25 @@ module tb_smart_device;
     endfunction
 
     // Expected node name (smart device IOIDENT answer)
+    // Vendor init table (jvs_ctrl vendor_rd_* ports), registered read like the core BRAM.
+    // Empty for the generic test; SMART_NAMCO loads the Time Crisis 4 table built by
+    // ../scripts/jvs_vendor.py (Makefile: vendor_namco_tc4.hex)
+    logic [7:0] vendor_mem [0:255];
+    always @(posedge clk) vendor_rd_data <= vendor_mem[vendor_rd_addr];
+    initial begin
+        for (int i = 0; i < 256; i++) vendor_mem[i] = 8'h00;
+`ifdef SMART_NAMCO
+        $readmemh("vendor_namco_tc4.hex", vendor_mem);
+`endif
+    end
+
+`ifdef SMART_NAMCO
+    localparam bit NAMCO = 1'b1;         // board model identifies as the Namco NA-JV
+    localparam string EXP_NAME = "namco ltd.;NA-JV;Ver1.00;JPN,Multipurpose.";
+`else
+    localparam bit NAMCO = 1'b0;
     localparam string EXP_NAME = "No Brand;NAOMI Converter98701;ver2.0; ";
+`endif
 
     int checks_failed = 0;
     task automatic check(input string what, input logic [31:0] got, input logic [31:0] exp);
@@ -205,6 +232,17 @@ module tb_smart_device;
         check("OUTPUT1 data byte 1", smart_jvs.dout_rx_data[0], TEST_DOUT[7:0]);
         check("OUTPUT1 data byte 2", smart_jvs.dout_rx_data[1], TEST_DOUT[15:8]);
         // Analog output command (33) received by the board
+        // Namco boards only: MAINID + command 70 after the feature check
+        check("MAINID frames (Namco only)", (smart_jvs.mainid_rx_frames > 0), NAMCO);
+        check("Namco 70 frames (Namco only)", (smart_jvs.namco70_rx_frames > 0), NAMCO);
+        if (NAMCO) begin
+            check("MAINID string", smart_jvs.mainid_rx_ok, 1);
+            check("Namco 70 data", smart_jvs.namco70_rx_ok, 1);
+        end
+        check("screen position (feature)", has_screen_pos, 1);
+        check("SCRPOSINP frames received > 0", (smart_jvs.scrpos_rx_frames > 0), 1);
+        check("screen position X", screen_pos_x, smart_jvs.EXP_SCR_X);
+        check("screen position Y", screen_pos_y, smart_jvs.EXP_SCR_Y);
         check("analog outputs (feature)", jvs_nodes.node_analog_output_channels[0], smart_jvs.EXP_AOUT_COUNT);
         check("ANLOUT frames received > 0", (smart_jvs.aout_rx_frames > 0), 1);
         check("ANLOUT channel count", smart_jvs.aout_rx_count, smart_jvs.EXP_AOUT_COUNT);
@@ -309,7 +347,8 @@ module tb_smart_device;
 
     // Instance Smart JVS Device avec réponses automatiques
     smart_jvs_device #(
-        .MASTER_CLK_FREQ(MASTER_CLK_FREQ)
+        .MASTER_CLK_FREQ(MASTER_CLK_FREQ),
+        .NAMCO(NAMCO)
     ) smart_jvs (
         .clk(clk),
         .rst(rst),

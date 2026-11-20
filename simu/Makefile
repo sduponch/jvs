@@ -3,6 +3,7 @@
 # Targets
 #   make smart        tb_smart_device: init, polling, outputs and link recovery against
 #                     the synthetic I/O board model (smart_jvs_device.sv)
+#   make smart_namco  same with the model identifying as the Namco NA-JV (MAINID + 70)
 #   make replay       tb_capture_replay: replay of a real bus capture (REPLAY=...)
 #   make regression   smart + replay of every capture in captures/ (used by the CI)
 #   make clean
@@ -68,22 +69,32 @@ define run_sim
 endef
 endif
 
-.PHONY: all smart replay replays regression clean help
+.PHONY: all smart smart_namco replay replays regression clean help
 all: regression
 
 smart:
 	@echo "=== tb_smart_device ($(SIM), FAST=$(FAST)) ==="
 	$(call run_sim,tb_smart_device,$(SMART_SOURCES),,smart.log)
 
+# Vendor init table of the Namco test (Time Crisis 4 host sequence after FEATCHK)
+vendor_namco_tc4.hex: ../scripts/jvs_vendor.py
+	python3 ../scripts/jvs_vendor.py --node 1 --mainid "namco ltd.;S246;VerA;JPN" \
+	    --frame "70 18 50 4C 14 40" --hex -o $@
+
+smart_namco: vendor_namco_tc4.hex
+	@echo "=== tb_smart_device, Namco board model ($(SIM), FAST=$(FAST)) ==="
+	$(call run_sim,tb_smart_device,$(SMART_SOURCES),SMART_NAMCO,smart_namco.log)
+
 replay: $(REPLAY)
 	@echo "=== tb_capture_replay $(REPLAY) ($(SIM)) ==="
 	$(call run_sim,tb_capture_replay,$(REPLAY_SOURCES),REPLAY_FILE=\"$(REPLAY)\",replay_$(notdir $(basename $(REPLAY))).log)
 
 # smart device test, then every capture of captures/ (stops on the first failure)
-regression: $(REPLAYS)
+regression: $(REPLAYS) vendor_namco_tc4.hex
 	@$(MAKE) --no-print-directory smart
+	@$(MAKE) --no-print-directory smart_namco
 	@for r in $(REPLAYS); do $(MAKE) --no-print-directory replay REPLAY=$$r || exit 1; done
-	@echo "*** REGRESSION PASSED ($(SIM)): smart device + $(words $(REPLAYS)) capture(s) ***"
+	@echo "*** REGRESSION PASSED ($(SIM)): smart device (generic + Namco) + $(words $(REPLAYS)) capture(s) ***"
 
 captures/%.replay: captures/%.bin ../scripts/jvs_dump.py
 	python3 ../scripts/jvs_dump.py $< --replay $@ $(shell cat captures/$*.opts 2>/dev/null)
@@ -92,10 +103,10 @@ captures/%.replay: captures/%.jvs ../scripts/jvs_dump.py
 	python3 ../scripts/jvs_dump.py $< --replay $@ $(shell cat captures/$*.opts 2>/dev/null)
 
 # replay scripts only (the CI generates them on the host, then runs the simulator in docker)
-replays: $(REPLAYS)
+replays: $(REPLAYS) vendor_namco_tc4.hex
 
 clean:
-	rm -rf work work_* obj_* transcript *.wlf *.vcd *.log *.build sim_jvs_dump.hex
+	rm -rf work work_* obj_* transcript *.wlf *.vcd *.log *.build sim_jvs_dump.hex vendor_*.hex
 
 help:
 	@sed -n '1,20p' Makefile

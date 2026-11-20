@@ -48,10 +48,13 @@ module tb_capture_replay;
         .has_screen_pos(), .screen_pos_x(), .screen_pos_y(),
         .coin_count(), .coin1(), .coin2(), .coin3(), .coin4(),
         .coin_status(coin_status),
-        .output_digital_ch1(16'h0000),          // same as the capture (32 01 00)
+        .p1_output_digital(24'h0), .p2_output_digital(24'h0),   // same as the capture (32 01 00)
+        .p3_output_digital(24'h0), .p4_output_digital(24'h0),
+        .output_node(8'd0),                     // every node
         .output_analog('0),
         .jvs_data_ready(), .jvs_nodes(jvs_nodes),
-        .node_name_rd_data(node_name_rd_data), .node_name_rd_addr(node_name_rd_addr)
+        .node_name_rd_data(node_name_rd_data), .node_name_rd_addr(node_name_rd_addr),
+        .vendor_rd_addr(), .vendor_rd_data(8'h00)   // empty vendor table: standard init
     );
 
     replay_jvs_device #(.CLK_FREQ(MASTER_CLK_FREQ), .REPLAY_FILE(REPLAY_FILE)) replay (

@@ -17,7 +17,10 @@
 `default_nettype none
 
 module smart_jvs_device #(
-    parameter MASTER_CLK_FREQ = 50_000_000
+    parameter MASTER_CLK_FREQ = 50_000_000,
+    // 1: identifies as the Namco NA-JV and answers MAINID (15) / Namco command 70, which the
+    // controller must then send after the feature check (as the Time Crisis 4 host does)
+    parameter bit NAMCO = 1'b0
 ) (
     input logic clk,
     input logic rst,
@@ -349,6 +352,43 @@ module smart_jvs_device #(
         $display("[SMART_JVS] Préparation réponse ACK");
     endfunction
 
+    // Namco init commands received (checked by the testbench)
+    localparam string NAMCO_NAME = "namco ltd.;NA-JV;Ver1.00;JPN,Multipurpose.";
+    localparam string EXP_MAINID = "namco ltd.;S246;VerA;JPN";
+    integer mainid_rx_frames = 0, namco70_rx_frames = 0;
+    logic   mainid_rx_ok = 0, namco70_rx_ok = 0;
+
+    function automatic void prepare_namco_id_response();
+        integer idx = 0;
+        logic [7:0] checksum = 0;
+        rx_buffer[idx++] = 8'hE0;
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = 8'h00;       // LENGTH (set below)
+        rx_buffer[idx++] = 8'h01;       // STATUS
+        rx_buffer[idx++] = 8'h01;       // REPORT
+        for (int i = 0; i < NAMCO_NAME.len(); i++) rx_buffer[idx++] = NAMCO_NAME[i];
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[2] = idx - 3 + 1;
+        for (int i = 1; i < idx; i++) checksum += rx_buffer[i];
+        rx_buffer[idx++] = checksum;
+        response_length = idx;
+    endfunction
+
+    // REPORT only answer (MAINID), or REPORT + one data byte (Namco 70: E0 00 04 01 01 01 07)
+    function automatic void prepare_report_response(input bit with_data, input logic [7:0] data);
+        integer idx = 0;
+        logic [7:0] checksum = 0;
+        rx_buffer[idx++] = 8'hE0;
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = with_data ? 8'h04 : 8'h03;
+        rx_buffer[idx++] = 8'h01;       // STATUS
+        rx_buffer[idx++] = 8'h01;       // REPORT
+        if (with_data) rx_buffer[idx++] = data;
+        for (int i = 1; i < idx; i++) checksum += rx_buffer[i];
+        rx_buffer[idx++] = checksum;
+        response_length = idx;
+    endfunction
+
     // Réponse Device ID (basée sur Tekken 6)
     function automatic void prepare_device_id_response();
         // E0002A01014E6F204272616E643B4E414F4D4920436F6E76657274657239383730313B766572322E303B2000F3
@@ -436,7 +476,8 @@ module smart_jvs_device #(
         // Features from Tekken 6 (exact copy)
         rx_buffer[idx++] = 8'h01;       // Digital inputs
         rx_buffer[idx++] = 8'h02;       // 2 players
-        rx_buffer[idx++] = 8'h0C;       // 12 buttons per player
+        rx_buffer[idx++] = 8'h18;       // 24 buttons per player (3 bytes, as the TC4 NA-JV;
+                                        // the 12 button / 2 byte case is covered by the SEGA replays)
         rx_buffer[idx++] = 8'h00;
         rx_buffer[idx++] = 8'h02;       // Coin inputs (function 02)
         rx_buffer[idx++] = 8'h02;       // 2 coin slots
@@ -450,6 +491,10 @@ module smart_jvs_device #(
         rx_buffer[idx++] = EXP_DOUT_COUNT; // number of outputs
         rx_buffer[idx++] = 8'h00;       //
         rx_buffer[idx++] = 8'h00;       //
+        rx_buffer[idx++] = 8'h06;       // Screen position inputs (function 06), as the TC4 NA-JV
+        rx_buffer[idx++] = 8'h10;       // X bits
+        rx_buffer[idx++] = 8'h10;       // Y bits
+        rx_buffer[idx++] = 8'h01;       // 1 channel
         rx_buffer[idx++] = 8'h13;       // Analog outputs (function 13)
         rx_buffer[idx++] = EXP_AOUT_COUNT; // number of channels
         rx_buffer[idx++] = 8'h00;       //
@@ -475,10 +520,16 @@ module smart_jvs_device #(
     localparam logic [7:0]  EXP_SYS_SW   = 8'h00;
     localparam logic [15:0] EXP_P1_SW    = 16'h8142;          // {byte1, byte2}
     localparam logic [15:0] EXP_P2_SW    = 16'h2418;
+    localparam logic [7:0]  EXP_P1_SW3   = 8'h5A;             // 3rd byte (buttons 17-24, not mapped)
+    localparam logic [7:0]  EXP_P2_SW3   = 8'hA5;
     localparam logic [15:0] EXP_COIN [2] = '{16'h0002, 16'h0005};   // {cond(2) counter(14)}
     // CH7 = E0D0: sent escaped on the wire (D0 DF D0 CF) to check the controller unescaping
     localparam logic [15:0] EXP_ANALOG [8] = '{16'h1234, 16'h5678, 16'h9ABC, 16'hDEF0,
                                                16'h1122, 16'h3344, 16'h5566, 16'hE0D0};
+    // Screen position (25): Y LSB = D0 (escaped on the wire)
+    localparam logic [15:0] EXP_SCR_X = 16'h4321;
+    localparam logic [15:0] EXP_SCR_Y = 16'h87D0;
+    integer scrpos_rx_frames = 0;
 
     // JVS escaping of a prepared answer (rx_buffer[0..response_length-1], E0 SYNC first):
     // every following E0 / D0 byte is sent as D0 DF / D0 CF
@@ -501,6 +552,7 @@ module smart_jvs_device #(
         logic [7:0] checksum = 0;
         logic       out1_requested = 0;
         logic       anlout_requested = 0;
+        logic       scrpos_requested = 0;
         // The request is still in rx_buffer (E0 node len cmd...): walk the chained commands
         // before building the answer in the same buffer
         begin
@@ -511,6 +563,11 @@ module smart_jvs_device #(
                     8'h20: p += 3;              // SWINP players bytes
                     8'h21: p += 2;              // COININP slots
                     8'h22: p += 2;              // ANLINP channels
+                    8'h25: begin                // SCRPOSINP channel
+                        scrpos_requested = 1;
+                        scrpos_rx_frames++;
+                        p += 2;
+                    end
                     8'h32: begin                // OUTPUT1 count data...
                         out1_requested = 1;
                         dout_rx_count = rx_buffer[p+1];
@@ -537,13 +594,15 @@ module smart_jvs_device #(
         rx_buffer[idx++] = 8'h00;       // LENGTH (set below)
         rx_buffer[idx++] = 8'h01;       // STATUS normal
 
-        // SWINP (20): REPORT, system byte, 2 players x 2 bytes
+        // SWINP (20): REPORT, system byte, 2 players x 3 bytes
         rx_buffer[idx++] = 8'h01;
         rx_buffer[idx++] = EXP_SYS_SW;
         rx_buffer[idx++] = EXP_P1_SW[15:8];
         rx_buffer[idx++] = EXP_P1_SW[7:0];
+        rx_buffer[idx++] = EXP_P1_SW3;
         rx_buffer[idx++] = EXP_P2_SW[15:8];
         rx_buffer[idx++] = EXP_P2_SW[7:0];
+        rx_buffer[idx++] = EXP_P2_SW3;
         // COININP (21): REPORT, 2 slots x 2 bytes
         rx_buffer[idx++] = 8'h01;
         for (int c = 0; c < 2; c++) begin
@@ -555,6 +614,15 @@ module smart_jvs_device #(
         for (int c = 0; c < 8; c++) begin
             rx_buffer[idx++] = EXP_ANALOG[c][15:8];
             rx_buffer[idx++] = EXP_ANALOG[c][7:0];
+        end
+
+        // SCRPOSINP (25): REPORT, X MSB LSB, Y MSB LSB (sent by the controller after ANLINP)
+        if (scrpos_requested) begin
+            rx_buffer[idx++] = 8'h01;
+            rx_buffer[idx++] = EXP_SCR_X[15:8];
+            rx_buffer[idx++] = EXP_SCR_X[7:0];
+            rx_buffer[idx++] = EXP_SCR_Y[15:8];
+            rx_buffer[idx++] = EXP_SCR_Y[7:0];
         end
 
         // OUTPUT1 (32) then ANLOUT (33): REPORT only
@@ -672,7 +740,8 @@ module smart_jvs_device #(
 
                     8'h10: begin // CMD_IOIDENT - Device identification
                         $display("[SMART_JVS] -> Demande d'identification");
-                        prepare_device_id_response();
+                        if (NAMCO) prepare_namco_id_response();
+                        else       prepare_device_id_response();
                         need_response = 1;
                     end
 
@@ -698,6 +767,24 @@ module smart_jvs_device #(
                         $display("[SMART_JVS] -> Demande features");
                         prepare_feature_response();
                         need_response = 1;
+                    end
+
+                    8'h15: begin // CMD_MAINID - main board ID string (Namco boards only)
+                        string id = "";
+                        for (int i = 4; i < 2 + rx_buffer[2] && rx_buffer[i] != 8'h00; i++) id = {id, string'(rx_buffer[i])};
+                        mainid_rx_frames++;
+                        mainid_rx_ok = (id == EXP_MAINID) && (rx_buffer[2] == 8'd2 + EXP_MAINID.len() + 1);
+                        $display("[SMART_JVS] -> MAINID \"%s\"", id);
+                        prepare_report_response(1'b0, 8'h00);
+                        need_response = NAMCO;
+                    end
+
+                    8'h70: begin // Namco command 70 18 50 4C 14 40
+                        namco70_rx_frames++;
+                        namco70_rx_ok = (rx_buffer[2] == 8'h07) && (rx_buffer[4] == 8'h18) && (rx_buffer[5] == 8'h50) &&
+                                        (rx_buffer[6] == 8'h4C) && (rx_buffer[7] == 8'h14) && (rx_buffer[8] == 8'h40);
+                        prepare_report_response(1'b1, 8'h01);
+                        need_response = NAMCO;
                     end
 
                     8'h20: begin // CMD_SWINP - Switch inputs (multicommande)

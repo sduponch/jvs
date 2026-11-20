@@ -43,6 +43,10 @@ package jvs_node_info_pkg;
 		logic [7:0] node_char_display_height [0:MAX_JVS_NODES-1]; // Character display height
 		logic [7:0] node_char_display_type [0:MAX_JVS_NODES-1];   // Character display type
 		logic       node_has_backup [0:MAX_JVS_NODES-1];         // Backup data support (unknown usage)
+		// Vendor init (jvs_ctrl vendor table, e.g. jvs_vendor.bin): pointers read for the node,
+		// 00 = NULL (nothing sent). MAINID string and vendor specific frames sent after FEATCHK
+		logic [7:0] node_mainid_ptr [0:MAX_JVS_NODES-1];
+		logic [7:0] node_vendor_ptr [0:MAX_JVS_NODES-1];
 	} jvs_node_info_t;
 
 	// Global JVS bus state, combining the SENSE/LINK hardware lines with the
