@@ -108,7 +108,7 @@ jvs/
 **ALPHA Version** - Partial implementation (~30-40% of JVS v3.0 specification)  
 Based on JVS Specification v3.0 (25 pages, 49 commands total)
 
-### ✅ Fully Implemented (11/49 commands)
+### ✅ Fully Implemented (14/49 commands)
 - **Reset (F0)** - Double reset sequence with timing delays
 - **Set Address (F1)** - Single device addressing
 - **IO Identity (10)** - Device name string reading (up to 100 chars)
@@ -116,28 +116,29 @@ Based on JVS Specification v3.0 (25 pages, 49 commands total)
 - **JVS Revision (12)** - Protocol version detection (BCD)
 - **Communications Version (13)** - Communication system version
 - **Feature Check (14)** - Complete capability parsing with all function codes
-- **Switch Inputs (20)** - Digital buttons (up to 4 players across chained nodes)
+- **Main ID (15)** - Sent after the feature check when the vendor init table gives a MAINID string for the node
+- **Switch Inputs (20)** - Digital buttons (up to 4 players across chained nodes), ceil(switches / 8) bytes per player (bytes beyond the 2nd, e.g. 24 switches, are read and skipped)
 - **Coin Inputs (21)** - Multi-slot coin counters (14-bit counter + condition), raw status on `coin_status`
 - **Analog Inputs (22)** - Up to 8 channels per node, 16-bit; per node copy on `node_analog`
-- **Generic Output 1 (32)** - Digital outputs, sent to every node declaring outputs with ceil(outputs/8) data bytes
-- **Analog Output (33)** - `output_analog` channels, sent to every node declaring analog outputs
+- **Screen Position Inputs (25)** - X/Y coordinates (16-bit each) on `screen_pos_x` / `screen_pos_y`
+- **Generic Output 1 (32)** - Digital outputs, ceil(outputs/8) data bytes (up to 3); each node receives the OR of the outputs of its players (`p1..p4_output_digital`), `output_node` selects the node(s)
+- **Analog Output (33)** - `output_analog` channels, sent to the nodes selected by `output_node` that declare analog outputs
+- **Vendor specific commands** - Any frame (e.g. Namco `70`) sent after the feature check from the vendor init table (answers are not parsed)
 - **JVS escape sequences** - E0 → D0 DF, D0 → D0 CF in both directions (validated in simulation)
 - **RS485 timing control** - Setup/hold delays (measured on hardware: 10 us / 30 us)
 
 ### 🟡 Partially Implemented (2/49 commands)
-- **Screen Position Inputs (25)** - Basic X/Y coordinates (16-bit each)
 - **Keycode Inputs (24)** - Command sent, response skipped
 - **Misc Switch Inputs (26)** - Command sent, response skipped
 
-### ❌ Not Implemented (36/49 commands)
-- **Main ID (15)** - Send main board identification to device
+### ❌ Not Implemented (33/49 commands)
 - **Rotary Inputs (23)** - Rotary encoder data (parsed but ignored)
 - **Remaining Payout (2E)** - Medal hopper status and count
 - **Data Retransmit (2F)** - Checksum error recovery
 - **Coin management**: COINDEC (30), COININC (35), PAYINC (31), PAYDEC (36)
 - **Advanced outputs**: OUTPUT2 (37), OUTPUT3 (38), CHAROUT (34)
 - **Communication changes**: COMMCHG (F2)
-- **Manufacturer-specific commands** (Taito TypeX, Namco, CyberLead LED)
+- **Manufacturer-specific answers** (Taito TypeX, Namco, CyberLead LED): the frames can be sent with the vendor init table, their answers are not decoded
 - **Dynamic baud rate changes**
 - **Checksum error recovery** (timeouts are recovered: unanswered commands are flushed and the init sequence restarts)
 
@@ -146,7 +147,7 @@ Based on JVS Specification v3.0 (25 pages, 49 commands total)
 ### Compatible I/O Boards
 - **SEGA 838-13683B** (`SEGA ENTERPRISES,LTD.;I/O 838-13683B ;Ver1.07;99/06`) - single board and two chained boards, hardware captures in `simu/captures/`
 - **NAJV2** (Tekken 7)
-- **NAJV** (Time Crisis 4)
+- **NAJV** (`namco ltd.;NA-JV;Ver1.00;JPN,Multipurpose.`, Time Crisis 4) - 24 switches, screen position, 18 outputs; the outputs (gun recoil solenoid) only work after MAINID + Namco `70 18 50 4C 14 40` (vendor init table), validated on the cabinet
 - **TAITO CORP Ver2.0** (Viewlix)
 - **"No Brand;NAOMI Converter98701;ver2.0"** - previously listed as incompatible; its oscilloscope capture (`simu/captures/naomi_tekken6_io_board_2.jvs`) now replays identically in simulation, hardware confirmation pending
 
@@ -282,6 +283,26 @@ jvs_ctrl #(.MASTER_CLK_FREQ(50_000_000), .HAS_LINK_DETECT(1)) jvs_inst (
 );
 ```
 
+### Digital outputs
+
+`p1_output_digital` ... `p4_output_digital` (24 bits: byte 1 = `[7:0]`, byte 2 = `[15:8]`, byte 3 = `[23:16]`) are the OUTPUT1 (32) bits of each player. Players are numbered across the chained nodes as the switch inputs: each node receives the OR of the outputs of its own players (e.g. two 2 player boards: P1 | P2 to the first one, P3 | P4 to the second). `output_node` limits OUTPUT1 / ANLOUT to one node address (0 = every node), e.g. for an output test on the node shown by a debugger.
+
+### Vendor init table
+
+Some boards need host specific frames after the standard init (the Namco NA-JV only drives its outputs after MAINID and the Namco command `70`). `jvs_ctrl` reads them from a 256 byte table owned by the integration (`vendor_rd_addr` / `vendor_rd_data`, registered read: data valid 2 cycles after the address), e.g. loaded from a file on the SD card:
+
+| Offset | Content |
+|---|---|
+| `0x00..0x0F` | 2 bytes per node n = 1..8: MAINID pointer, vendor frames pointer (`00` = NULL, nothing sent) |
+| MAINID entry | `00` terminated string, sent as `15 <string> 00` |
+| vendor entry | frames `[L][L bytes: command + data]` ... `[00]`, one JVS frame each |
+
+They are sent after the feature check of the node, 10 ms apart (the NA-JV ignores a frame sent 0.5 ms after the previous answer); a missing answer does not stop the init. The pointers read for each node are copied to `jvs_nodes.node_mainid_ptr` / `node_vendor_ptr`. An all zero table (or `vendor_rd_data` tied to 0) gives a standard init. `scripts/jvs_vendor.py` builds the table; it can also add the blocks used by the JVS Debugger core at the end of the table (player axes, gun triggers, recoil masks, OUTPUT1 base, `0xD8..0xFF`).
+
+```bash
+python3 scripts/jvs_vendor.py --node 1 --mainid "namco ltd.;S246;VerA;JPN" --frame "70 18 50 4C 14 40" -o jvs_vendor.bin
+```
+
 ### Debug and per node outputs
 
 | Port | Content |
@@ -311,10 +332,12 @@ cd simu
 make regression                 # smart device test + replay of every capture (Questa)
 make regression SIM=verilator   # same with Verilator (used by the CI)
 make smart                      # tb_smart_device only
+make smart_namco                # tb_smart_device with the Namco NA-JV model and vendor table
 make replay REPLAY=captures/sega_838-13683B_x2.replay
 ```
 
-* `tb_smart_device`: identification, input polling, digital outputs and link recovery (the board stops answering, then answers again) against `smart_jvs_device.sv`, with automatic `[CHECK] PASS/FAIL` lines.
+* `tb_smart_device`: identification, input polling (24 switches per player, coins, analog, screen position), OUTPUT1 routing per node (P3 / P4 outputs must not reach a 2 player node), ANLOUT, escaping in both directions and link recovery (the board stops answering, then answers again) against `smart_jvs_device.sv`, with automatic `[CHECK] PASS/FAIL` lines. The generic run checks that an empty vendor table sends nothing.
+* `smart_namco`: same, the model identifies as the Namco NA-JV and the vendor table (built by `scripts/jvs_vendor.py`) must make the controller send MAINID and `70 18 50 4C 14 40`.
 * `tb_capture_replay`: plays a real capture back against the controller (request driven): every frame sent by the controller is compared byte by byte with the captured one, and the decoded values (identity, revisions, switches, coins, analog channels) are checked per node.
 * `FAST=1` (default) defines `JVS_SIM_FAST`, which shortens the startup / reset delays and the answer timeout: the full regression runs in about 20 s.
 * Adding a regression vector: copy a capture to `simu/captures/<name>.bin` (Pocket dump) or `<name>.jvs` (text capture, with optional conversion options in `<name>.opts`). The replay script is generated by the Makefile.
