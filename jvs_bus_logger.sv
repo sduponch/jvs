@@ -42,7 +42,7 @@ module jvs_bus_logger #(
     input  wire        setup_n,                  // SNAC IN7 raw level
     input  wire        link_n,                   // SNAC IO3 raw level
     output logic [15:0] entry_count,
-    output wire        full,                     // buffer full: capture stopped (never in ring mode)
+    output logic       full,                     // buffer full: capture stopped (never in ring mode), registered
     output wire        waiting,                  // armed, waiting for the first E0
 
     // Bridge read port (word address), registered on rd_clk
@@ -58,7 +58,10 @@ module jvs_bus_logger #(
     logic        sync_wait;                      // latched on restart, cleared by the first E0
     logic        wrapped;
     logic [15:0] oldest;                         // ring mode: index of the oldest entry
-    assign full = !ring_mode && (entry_count >= MAX_ENTRIES);
+    // Registered: full is read from another clock domain (core_top). A combinational compare
+    // could glitch while entry_count changes several bits at once (0x37FF -> 0x3800 looked
+    // like 0x3FFF for a moment and triggered the auto save of a 14336 entry init capture)
+    always @(posedge clk) full <= !ring_mode && (entry_count >= MAX_ENTRIES);
 
     (* ramstyle = "M10K" *) logic [31:0] mem [WORDS];
     always @(posedge rd_clk) rd_data <= mem[rd_addr];
@@ -208,7 +211,7 @@ module jvs_bus_logger #(
     end
 
     initial begin
-        running = 1'b0; mem_we = 1'b0; ring_mode = 1'b0; sync_wait = 1'b0; wrapped = 1'b0; oldest = '0; entry_count = '0; hdr_idx = '0; time_us = '0; us_div = '0;
+        full = 1'b0; running = 1'b0; mem_we = 1'b0; ring_mode = 1'b0; sync_wait = 1'b0; wrapped = 1'b0; oldest = '0; entry_count = '0; hdr_idx = '0; time_us = '0; us_div = '0;
         tx_pend = 1'b0; rx_pend = 1'b0; ln_pend = 1'b0; dir_pend = 1'b0; seq = '0; waddr = '0;
         lines_stable = 2'b11; lines_cand = 2'b11; lines_cnt = '0;
     end

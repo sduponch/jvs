@@ -5,7 +5,9 @@ File layout (32-bit big-endian words):
   word 0..1 : b"JVSDUMP2" (b"JVSDUMP1": 4-word header, words 4..7 below absent)
   word 2    : number of entries
   word 3    : timestamp unit in ns (1000 = microseconds)
-  word 4    : flags: bit 0 = sniffer / ring mode, bit 1 = ring wrapped
+  word 4    : flags: bit 0 = ring mode (sniffer, or debugger once the init capture is
+              saved), bit 1 = ring wrapped. A sniffer capture is recognized by the
+              absence of TX / DIR entries (controller off, adapter driver disabled)
   word 5    : index of the oldest entry (ring mode: entries are stored circularly)
   word 6..7 : reserved
   then 2 words per entry:
@@ -38,7 +40,7 @@ DV_AFTER_START_US = 9.5 * BIT_US
 DV_BEFORE_END_US = 0.5 * BIT_US
 
 
-DUMP_INFO = {"sniffer": False}       # header information of the last dump read
+DUMP_INFO = {"sniffer": False, "ring": False}       # header information of the last dump read
 
 
 def read_dump(path):
@@ -52,7 +54,7 @@ def read_dump(path):
     if data[7:8] == b"2":
         flags, oldest = struct.unpack(">II", data[16:24])
         hdr = 32
-    DUMP_INFO["sniffer"] = bool(flags & 1)
+    DUMP_INFO["ring"] = bool(flags & 1)
     DUMP_INFO["wrapped"] = bool(flags & 2)
     entries = []
     for n in range(count):
@@ -70,6 +72,13 @@ def read_dump(path):
         })
     if DUMP_INFO["wrapped"] and 0 < oldest < len(entries):
         entries = entries[oldest:] + entries[:oldest]   # ring buffer: oldest entry first
+    # flags bit 0 only says "ring buffer" (the debugger uses it once its init capture is
+    # saved, the sniffer init capture does not). In sniffer mode the controller is off: no
+    # TX byte and no DIR change; its ring capture is in ring mode, its init capture starts
+    # on the first E0 (a debugger init capture starts with the SETUP / LINK state)
+    no_tx = not any(e["type"] in (TYPE_TX, TYPE_DIR) for e in entries)
+    starts_on_sync = bool(entries) and entries[0]["type"] == TYPE_RX and entries[0]["byte"] == 0xE0
+    DUMP_INFO["sniffer"] = no_tx and (DUMP_INFO["ring"] or starts_on_sync)
     return entries
 
 
@@ -310,7 +319,11 @@ def main():
     entries = read_dump(args.dump)
     if DUMP_INFO["sniffer"]:
         print("sniffer capture (whole bus seen on the receive line)"
-              + (", ring buffer wrapped" if DUMP_INFO["wrapped"] else ""))
+              + (", ring buffer" if DUMP_INFO["ring"] else ", from the first E0")
+              + (" wrapped" if DUMP_INFO["wrapped"] else ""))
+    elif DUMP_INFO.get("ring"):
+        print("debugger capture, last seconds (ring buffer"
+              + (", wrapped)" if DUMP_INFO["wrapped"] else ")"))
     if args.replay:
         n, expect = export_replay(bin_events(entries), args.replay, os.path.basename(args.dump))
         print(f"{args.replay}: {n} lines, expected values: {', '.join(expect)}")
