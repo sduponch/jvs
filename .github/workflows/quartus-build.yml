@@ -1,96 +1,44 @@
 name: JVS Submodule Quartus Compilation
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
 
 jobs:
-  # Simulation tests are temporarily disabled
-  # simulation-tests:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #   - name: Checkout repository
-  #     uses: actions/checkout@v4
-  #     with:
-  #       repository: RndMnkIII/JVS_Debugger
-  #       ref: jvs_submodule
-  #       path: JVS_Debugger
-  #       submodules: 'recursive'
-  #   - name: Update JVS submodule to PR branch
-  #     run: |
-  #       cd JVS_Debugger/src/fpga/analogizer/jvs
-  #       git fetch origin
-  #       # Use the branch from the PR context, fallback to main for direct pushes
-  #       if [ "${{ github.event_name }}" = "pull_request" ]; then
-  #         BRANCH_REF="${{ github.head_ref }}"
-  #         echo "🔄 PR detected - using branch: $BRANCH_REF"
-  #         git checkout origin/$BRANCH_REF || {
-  #           echo "⚠️ Branch $BRANCH_REF not found, falling back to main"
-  #           git checkout origin/main
-  #         }
-  #       else
-  #         BRANCH_REF="${{ github.ref_name }}"
-  #         echo "📤 Push detected - using branch: $BRANCH_REF"
-  #         git checkout origin/$BRANCH_REF
-  #       fi
-  #       cd ../../../..
-  #       echo "✅ JVS submodule updated to branch: $BRANCH_REF"
-  #   - name: Install Quartus dependencies (includes ModelSim)
-  #     run: |
-  #       sudo apt-get update
-  #       sudo apt-get install -y libc6-i386 lib32z1 lib32ncurses6 libbz2-1.0 libxext6 libxft2 libxi6 libxtst6
-  #   - name: Cache Quartus installation
-  #     uses: actions/cache@v4
-  #     id: quartus-cache
-  #     with:
-  #       path: |
-  #         ~/quartus
-  #         ~/downloadtmp
-  #       key: quartus-lite-24.1std-1077-${{ runner.os }}-cyclonev-modelsim
-  #       restore-keys: |
-  #         quartus-lite-24.1std-1077-${{ runner.os }}-
-  #   - name: Install Quartus Prime Lite (includes ModelSim)
-  #     if: steps.quartus-cache.outputs.cache-hit != 'true'
-  #     run: |
-  #       echo "⬇️ Cache miss - Installing Quartus Prime Lite..."
-  #       wget -q https://downloads.intel.com/akdlm/software/acdsinst/24.1std/1077/qinst/qinst-lite-linux-24.1std-1077.run
-  #       chmod +x qinst-lite-linux-24.1std-1077.run
-  #       ./qinst-lite-linux-24.1std-1077.run --accept --quiet --nox11 --target $HOME/quartus_temp -- --cli --download-dir ~/downloadtmp --install-dir ~/quartus --accept-eula --components quartus,cyclonev
-  #       echo "📦 Installing ModelSim separately..."
-  #       wget -q https://downloads.intel.com/akdlm/software/acdsinst/20.1std.1/720/ib_installers/ModelSimSetup-20.1.1.720-linux.run
-  #       chmod +x ModelSimSetup-20.1.1.720-linux.run
-  #       ./ModelSimSetup-20.1.1.720-linux.run --mode unattended --installdir ~/quartus/modelsim_ase --accept_eula 1
-  #   - name: Setup Quartus environment (with ModelSim)
-  #     run: |
-  #       if [ "${{ steps.quartus-cache.outputs.cache-hit }}" == "true" ]; then
-  #         echo "✅ Cache hit - Using cached Quartus installation"
-  #       fi
-  #       echo "QUARTUS_ROOTDIR=$HOME/quartus/quartus" >> $GITHUB_ENV
-  #       echo "PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$HOME/quartus/modelsim_ase/linuxaloem:$PATH" >> $GITHUB_ENV
-  #       echo "LD_LIBRARY_PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib:$HOME/quartus/modelsim_ase/linuxaloem" >> $GITHUB_ENV
-  #   - name: Run JVS Simulation Tests
-  #     run: |
-  #       cd JVS_Debugger/src/fpga/analogizer/jvs/simu
-  #       echo "✅ Testing ModelSim installation..."
-  #       vsim -version || echo "Version check failed but continuing..."
-  #       echo "🧪 Running Test 03: Full JVS identification..."
-  #       make test_03
-  #       echo "✅ JVS Test 03 completed successfully"
-  #   - name: Upload test results
-  #     uses: actions/upload-artifact@v4
-  #     if: always()
-  #     with:
-  #       name: jvs-simulation-results
-  #       path: |
-  #         JVS_Debugger/src/fpga/analogizer/jvs/simu/*.vcd
-  #         JVS_Debugger/src/fpga/analogizer/jvs/simu/*.log
-  #         JVS_Debugger/src/fpga/analogizer/jvs/simu/work/
-  #       retention-days: 7
+  # Simulation regression (open source Verilator, no license needed):
+  #   - tb_smart_device: init, polling, digital outputs and link recovery against the
+  #     synthetic I/O board model
+  #   - tb_capture_replay: replay of every real bus capture of simu/captures/*.bin
+  #     (frames sent by the controller compared byte by byte, decoded values checked)
+  simulation-regression:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Generate replay scripts from the captures
+      run: make -C simu replays
+
+    - name: Run simulation regression (Verilator)
+      run: |
+        docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work/simu --entrypoint make \
+          verilator/verilator:v5.030 regression SIM=verilator
+
+    - name: Upload simulation logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: jvs-simulation-logs
+        path: |
+          simu/*.log
+          simu/*.build
+        retention-days: 7
 
   quartus-build:
-    # needs: simulation-tests  # Dependency removed since simulation is disabled
+    needs: simulation-regression  # do not build when the simulation regression fails
     runs-on: ubuntu-latest
     permissions:
       contents: read
