@@ -1,118 +1,101 @@
-# Makefile pour les tests JVS Controller avec Modelsim/Questasim
+# JVS controller simulation
+#
+# Targets
+#   make smart        tb_smart_device: init, polling, outputs and link recovery against
+#                     the synthetic I/O board model (smart_jvs_device.sv)
+#   make replay       tb_capture_replay: replay of a real bus capture (REPLAY=...)
+#   make regression   smart + replay of every capture in captures/ (used by the CI)
+#   make clean
+#
+# Options
+#   SIM=questa|verilator   simulator (default questa; the CI uses verilator)
+#   FAST=1|0               JVS_SIM_FAST: shortened startup/reset delays (default 1)
+#   REPLAY=captures/x.replay  capture for `make replay` (generated from x.bin or x.jvs)
+#   VCD=1                  waveform dump (tb_smart_device only, large file)
+#
+# A new capture (jvs_dump.bin from the Pocket) just has to be copied to
+# captures/<name>.bin: the replay script is generated with ../scripts/jvs_dump.py.
 
-# Variables (auto-détection de l'OS)
-# Force .exe pour WSL qui utilise les outils Windows
-ifeq ($(OS),Windows_NT)
-    VSIM = vsim.exe
-    VLOG = vlog.exe
-    VLIB = vlib.exe
-    VMAP = vmap.exe
-else ifneq ($(shell uname -r | grep -i microsoft),)
-    # WSL détecté - utilise les .exe Windows
-    VSIM = vsim.exe
-    VLOG = vlog.exe
-    VLIB = vlib.exe
-    VMAP = vmap.exe
+SIM    ?= questa
+FAST   ?= 1
+REPLAY ?= captures/sega_838-13683B.replay
+VCD    ?= 0
+
+RTL_DIR = ..
+PKGS    = $(RTL_DIR)/rtl/jvs_defs_pkg.sv $(RTL_DIR)/rtl/jvs_node_info_pkg.sv
+CTRL    = $(RTL_DIR)/uart_tx.v $(RTL_DIR)/uart_rx.v $(RTL_DIR)/jvs_com.sv $(RTL_DIR)/jvs_ctrl.sv
+
+SMART_SOURCES  = $(PKGS) $(CTRL) $(RTL_DIR)/jvs_bus_logger.sv smart_jvs_device.sv tb_smart_device.sv
+REPLAY_SOURCES = $(PKGS) $(CTRL) replay_jvs_device.sv tb_capture_replay.sv
+
+# Captures: jvs_dump.bin from the Pocket, or .jvs text captures (oscilloscope decode, one
+# frame per line). An optional captures/<name>.opts holds jvs_dump.py conversion options
+# (e.g. --prepend-resets --drop <host only request>).
+CAPTURES = $(sort $(wildcard captures/*.bin) $(wildcard captures/*.jvs))
+REPLAYS  = $(addsuffix .replay,$(basename $(CAPTURES)))
+
+DEFINES = $(if $(filter 1,$(FAST)),JVS_SIM_FAST)
+RESULT_FILTER = "\[CHECK\]|CHECKS|ALL CHECKS|CHECK\(S\)|TX MISMATCH|script done|\*\* (Error|Fatal)|%Error"
+
+#---------------------------------------------------------------------------
+# Simulator specific commands: $(call run_sim,<top>,<sources>,<extra defines>,<log>)
+#---------------------------------------------------------------------------
+ifeq ($(SIM),verilator)
+VERILATOR ?= verilator
+VERILATOR_FLAGS = --binary --timing -j 0 -Wno-fatal -Wno-lint -Wno-style -Wno-WIDTH \
+                  -Wno-MULTIDRIVEN -Wno-INITIALDLY -Wno-UNOPTFLAT --assert \
+                  -I$(RTL_DIR) -I$(RTL_DIR)/rtl
+define run_sim
+	rm -rf obj_$(1)
+	$(VERILATOR) $(VERILATOR_FLAGS) --top-module $(1) --Mdir obj_$(1) \
+	    $(foreach d,$(DEFINES) $(3),-D$(d)) $(2) > $(4).build 2>&1 || { tail -40 $(4).build; exit 1; }
+	./obj_$(1)/V$(1) $(if $(filter 1,$(VCD)),+vcd) > $(4) 2>&1; grep -E $(RESULT_FILTER) $(4); grep -q "ALL CHECKS PASSED" $(4)
+endef
 else
-    # Linux natif
-    VSIM = vsim
-    VLOG = vlog
-    VLIB = vlib
-    VMAP = vmap
+QUESTA_LICENSE ?= $(HOME)/.altera.quartus/questa_lic.dat
+export SALT_LICENSE_SERVER ?= $(QUESTA_LICENSE)
+VLIB = vlib
+VLOG = vlog
+VSIM = vsim
+VLOG_FLAGS = -sv -suppress 2892 +incdir+$(RTL_DIR) +incdir+$(RTL_DIR)/rtl
+define run_sim
+	rm -rf work_$(1)
+	$(VLIB) work_$(1) > /dev/null
+	$(VLOG) $(VLOG_FLAGS) -work work_$(1) $(foreach d,$(DEFINES) $(3),+define+$(d)) $(2) > $(4).build 2>&1 || { grep -E "Error" $(4).build; exit 1; }
+	$(VSIM) -c -lib work_$(1) $(if $(filter 1,$(VCD)),+vcd) -do "run -all; quit -f" $(1) 2>&1 \
+	    | grep -v -E "^# \[(JVS_COM|SMART_JVS|FIFO|RS485|CONTROLLER|TEST)\]|^# \[[0-9]+\] JVS_COM" > $(4); \
+	grep -E $(RESULT_FILTER) $(4); grep -q "ALL CHECKS PASSED" $(4)
+endef
 endif
 
-# Bibliothèques
-WORK_LIB = work
+.PHONY: all smart replay replays regression clean help
+all: regression
 
-# Sources nécessaires
-SOURCES = ../rtl/jvs_node_info_pkg.sv \
-          ../uart_tx.v \
-          ../uart_rx.v \
-          ../jvs_controller.sv \
-          fake_jvs_device.sv
+smart:
+	@echo "=== tb_smart_device ($(SIM), FAST=$(FAST)) ==="
+	$(call run_sim,tb_smart_device,$(SMART_SOURCES),,smart.log)
 
-# Sources pour tests avancés avec Smart Device
-SMART_SOURCES = ../rtl/jvs_defs_pkg.sv \
-                ../rtl/jvs_node_info_pkg.sv \
-                jvs_com_pkg.sv \
-                ../uart_tx.v \
-                ../uart_rx.v \
-                ../jvs_com.sv \
-                jvs_com_wrapper.sv \
-                ../jvs_ctrl.sv \
-                smart_jvs_device.sv
+replay: $(REPLAY)
+	@echo "=== tb_capture_replay $(REPLAY) ($(SIM)) ==="
+	$(call run_sim,tb_capture_replay,$(REPLAY_SOURCES),REPLAY_FILE=\"$(REPLAY)\",replay_$(notdir $(basename $(REPLAY))).log)
 
-# Sources pour tests avec l'ancien controller refactorisé
-REFACTOR_SOURCES = ../rtl/jvs_node_info_pkg.sv \
-                   jvs_com_pkg.sv \
-                   ../uart_tx.v \
-                   ../uart_rx.v \
-                   ../jvs_com.sv \
-                   jvs_com_wrapper.sv \
-                   ../jvs_controller.sv.to_refactor \
-                   smart_jvs_device.sv
+# smart device test, then every capture of captures/ (stops on the first failure)
+regression: $(REPLAYS)
+	@$(MAKE) --no-print-directory smart
+	@for r in $(REPLAYS); do $(MAKE) --no-print-directory replay REPLAY=$$r || exit 1; done
+	@echo "*** REGRESSION PASSED ($(SIM)): smart device + $(words $(REPLAYS)) capture(s) ***"
 
-# Flags de compilation
-VLOG_FLAGS = -sv +incdir+../include +incdir+../rtl +incdir+../jvscom +incdir+.. -suppress 2892
+captures/%.replay: captures/%.bin ../scripts/jvs_dump.py
+	python3 ../scripts/jvs_dump.py $< --replay $@ $(shell cat captures/$*.opts 2>/dev/null)
 
-# Targets de test
-.PHONY: all test_01 test_02 test_03 test_03_refactor clean setup
+captures/%.replay: captures/%.jvs ../scripts/jvs_dump.py
+	python3 ../scripts/jvs_dump.py $< --replay $@ $(shell cat captures/$*.opts 2>/dev/null)
 
-all: setup test_01
-
-# Configuration des bibliothèques
-setup:
-	@echo "=== Configuration des bibliothèques Modelsim ==="
-	$(VLIB) $(WORK_LIB) || true
-	$(VMAP) work $(WORK_LIB) || true
-
-test_01: setup
-	@echo "=== Compilation du Test 01 avec Fake JVS Device ==="
-	$(VLOG) $(VLOG_FLAGS) -work $(WORK_LIB) $(SOURCES) test_01_with_fake_jvs.sv
-	@echo "=== Exécution du Test 01 avec décodage UART fiable ==="
-	$(VSIM) -c -do "run -all; quit" $(WORK_LIB).test_01_with_fake_jvs
-
-test_02: setup
-	@echo "=== Compilation du Test 02: Address Assignment Sequence ==="
-	$(VLOG) $(VLOG_FLAGS) -work $(WORK_LIB) $(SOURCES) test_02_address_assignment.sv
-	@echo "=== Exécution du Test 02 ==="
-	$(VSIM) -c -do "run -all; quit" $(WORK_LIB).test_02_address_assignment
-
-test_03: setup
-	@echo "=== Compilation du Test 03: Device Identification avec Smart JVS et API BRAM ==="
-	$(VLOG) $(VLOG_FLAGS) -work $(WORK_LIB) $(SMART_SOURCES) test_03_device_identification.sv
-	@echo "=== Exécution du Test 03 ==="
-	$(VSIM) -c -do "run -all; quit" $(WORK_LIB).test_03_device_identification
-
-test_03_refactor: setup
-	@echo "=== Compilation du Test 03: Device Identification avec Controller Refactorisé ==="
-	$(VLOG) $(VLOG_FLAGS) -work $(WORK_LIB) $(REFACTOR_SOURCES) test_03_device_identification.sv
-	@echo "=== Exécution du Test 03 avec ancien controller refactorisé ==="
-	$(VSIM) -c -do "run -all; quit" $(WORK_LIB).test_03_device_identification
-
-# Test avec GUI pour debug
-test_01_gui: setup
-	@echo "=== Test 01 avec interface graphique ==="
-	$(VLOG) $(VLOG_FLAGS) -work $(WORK_LIB) $(SOURCES) test_01_with_fake_jvs.sv
-	$(VSIM) -gui $(WORK_LIB).test_01_with_fake_jvs
-
-# Test en mode batch avec génération de traces
-test_01_wave: setup
-	@echo "=== Test 01 avec génération de waveform ==="
-	$(VLOG) $(VLOG_FLAGS) -work $(WORK_LIB) $(SOURCES) test_01_with_fake_jvs.sv
-	$(VSIM) -c -do "add wave -radix hex /test_01_with_fake_jvs/*; run -all; write format wave -window .main_pane.wave.interior.cs.body.pw.wf test_01.wlf; quit" $(WORK_LIB).test_01_with_fake_jvs
+# replay scripts only (the CI generates them on the host, then runs the simulator in docker)
+replays: $(REPLAYS)
 
 clean:
-	rm -rf $(WORK_LIB) transcript *.wlf *.vcd vsim.wlf
+	rm -rf work work_* obj_* transcript *.wlf *.vcd *.log *.build sim_jvs_dump.hex
 
-# Affichage de l'aide
 help:
-	@echo "Targets disponibles:"
-	@echo "  test_01         - Test de trame reset UART (optimisé 250kHz)"
-	@echo "  test_02         - Test de séquence d'assignation d'adresse (optimisé 250kHz)"
-	@echo "  test_03         - Test d'identification JVS complète avec Smart Device et API BRAM"
-	@echo "  test_03_refactor- Test 03 avec l'ancien controller refactorisé"
-	@echo "  test_01_gui     - Test 01 avec interface graphique Modelsim"
-	@echo "  test_01_wave    - Test 01 avec génération de waveform"
-	@echo "  setup           - Configuration des bibliothèques"
-	@echo "  clean           - Nettoyer les fichiers générés"
+	@sed -n '1,20p' Makefile
