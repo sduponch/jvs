@@ -12,7 +12,17 @@
 import jvs_defs_pkg::*;
 import jvs_node_info_pkg::*;
 
-module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
+module jvs_ctrl #(
+    parameter MASTER_CLK_FREQ = 50_000_000,
+    // Set to 1 when the hardware provides a LINK signal (device present on SENSE line).
+    // When 0, i_link is ignored and a device is always assumed to be present.
+    parameter HAS_LINK_DETECT = 0,
+    // Debounce time applied to i_sense and i_link (hot-plug, comparator glitches)
+    parameter LINE_DEBOUNCE_MS = 10,
+    // Link lost (SENSE no longer "addressed" while polling): time to wait for the
+    // device to come back with its address before restarting a full init sequence
+    parameter RELINK_TIMEOUT_MS = 3000
+)
 (
     // System clock and control signals
     input logic i_clk,        // System clock (typically 50MHz)
@@ -23,8 +33,10 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     // UART interface signals for RS485 communication
     input logic i_uart_rx,    // Serial data received from JVS device
     output logic o_uart_tx,   // Serial data transmitted to JVS device
-    input logic i_sense,      // JVS SENSE line (read-only for master)
+    input logic i_sense,      // JVS SENSE line state: 1 = all devices addressed (SENSE ~0V), 0 = address needed or no device
+    input logic i_link,       // Device present on SENSE line (active high). Used only when HAS_LINK_DETECT=1
     output logic o_rx485_dir, // RS485 transceiver direction control (0=RX, 1=TX)
+    output jvs_bus_state_t o_bus_state, // Global JVS bus state (see jvs_node_info_pkg)
     
     // Output registers for direct interface
     output logic [15:0] player1_input_switch, // Player 1 digital input switches
@@ -40,6 +52,10 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     output logic [15:0] analog_ch6,    // Analog channel 6 (16-bit)
     output logic [15:0] analog_ch7,    // Analog channel 7 (16-bit)
     output logic [15:0] analog_ch8,    // Analog channel 8 (16-bit)
+    // Per node analog channels (debug/display): node n channel c at [(n*8 + c)*16 +: 16]
+    // analog_ch1..8 above hold the channels of all chained nodes one after the other
+    // (limited to 8), this output keeps the 8 channels of every node.
+    output logic [jvs_node_info_pkg::MAX_JVS_NODES*8*16-1:0] node_analog,
     
     // Screen position outputs (light gun/touch screen) - raw 16-bit data
     output logic has_screen_pos,        // Device supports screen position inputs
@@ -52,9 +68,16 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     output logic coin2,                 // Coin increase signal for slot 2
     output logic coin3,                 // Coin increase signal for slot 3
     output logic coin4,                 // Coin increase signal for slot 4
+    // Raw coin slot status as reported by the I/O boards (debug/display), global slots 0..3
+    // (slots of chained nodes one after the other): slot s at [s*16 +: 16] =
+    // {condition[1:0] (0 normal, 1 jam, 2 disconnected, 3 busy), counter[13:0]}
+    output logic [4*16-1:0] coin_status,
     
     // Digital output from SNAC
     input logic [15:0] output_digital_ch1, // Digital output channel 1 from SNAC
+    // Analog outputs sent with ANLOUT (33): channel c at [c*16 +: 16] (8 channels max,
+    // channels declared beyond 8 are sent as 0)
+    input logic [8*16-1:0] output_analog,
 
     //JVS node information structure
     output logic jvs_data_ready,
@@ -125,17 +148,71 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
 
     // Analog parsing variables - simplified
     logic [7:0] temp_high_byte;     // Temporary storage for high byte
+
+    //=========================================================================
+    // SENSE / LINK LINE CONDITIONING
+    //=========================================================================
+    // Both lines come asynchronously from external comparators: synchronize
+    // them (2 flip-flops) then only accept a new level once it has been stable
+    // for LINE_DEBOUNCE_MS (filters hot-plug bounces and comparator glitches).
+    localparam int LINE_DEBOUNCE_COUNT = (MASTER_CLK_FREQ / 1000) * LINE_DEBOUNCE_MS;
+    localparam int LINE_DEBOUNCE_BITS  = $clog2(LINE_DEBOUNCE_COUNT + 1);
+
+    logic [1:0] sense_sync, link_sync;
+    logic       sense_f,    link_f;      // Filtered levels
+    logic [LINE_DEBOUNCE_BITS-1:0] sense_cnt, link_cnt;
+
+    always_ff @(posedge i_clk) begin
+        sense_sync <= {sense_sync[0], i_sense};
+        link_sync  <= {link_sync[0],  (HAS_LINK_DETECT != 0) ? i_link : 1'b1};
+
+        if (i_rst) begin
+            sense_f   <= 1'b0;
+            link_f    <= (HAS_LINK_DETECT == 0); // No detection: device always assumed present
+            sense_cnt <= '0;
+            link_cnt  <= '0;
+        end else begin
+            if (sense_sync[1] == sense_f)                       sense_cnt <= '0;
+            else if (sense_cnt == LINE_DEBOUNCE_COUNT[LINE_DEBOUNCE_BITS-1:0]) begin
+                sense_f   <= sense_sync[1];
+                sense_cnt <= '0;
+            end else                                            sense_cnt <= sense_cnt + 1'b1;
+
+            if (link_sync[1] == link_f)                         link_cnt <= '0;
+            else if (link_cnt == LINE_DEBOUNCE_COUNT[LINE_DEBOUNCE_BITS-1:0]) begin
+                link_f   <= link_sync[1];
+                link_cnt <= '0;
+            end else                                            link_cnt <= link_cnt + 1'b1;
+        end
+    end
+
+    // No device on the bus: keep the protocol state machine and jvs_com in reset.
+    // Nothing is transmitted until a device is plugged, and a full init sequence
+    // (startup delay + double reset + addressing) restarts on every hot-plug.
+    wire link_lost = ~link_f;
+
+    // SENSE based link supervision (works without LINK detection):
+    //  - sense_armed : polling started with SENSE "addressed" -> SENSE can be trusted
+    //  - reinit_req  : one cycle pulse restarting the whole init sequence
+    //  - com_flush   : jvs_com held in reset while the link is lost (drops pending
+    //                  frames and command FIFO so that parsing restarts cleanly)
+    logic sense_armed;
+    logic reinit_req;
+    logic rx_next_wait;     // STATE_RX_NEXT: first (stale rx_ready) cycle done
+    logic com_timeout_flush; // one cycle jvs_com reset on answer timeout (drops unanswered commands)
+    logic com_flush;
+
     //=========================================================================
     // JVS COMMUNICATION MODULE INSTANCE
     //=========================================================================
-    
+
     // Instantiate JVS communication module
     jvs_com #(
         .MASTER_CLK_FREQ(MASTER_CLK_FREQ),
         .JVS_BUFFER_SIZE(256)
     ) jvs_com_inst (
         .clk_sys(i_clk),  // RX_NEXT/TX_NEXT states handle timing control
-        .reset(i_rst),
+        .reset(i_rst | link_lost | reinit_req | com_flush | com_timeout_flush),
         .i_ena(i_ena),
 
         // UART Physical Interface
@@ -179,12 +256,19 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     //=========================================================================
 
     // Common delay timings (in clock cycles at MASTER_CLK_FREQ)
-    localparam logic [31:0] INIT_DELAY_COUNT = MASTER_CLK_FREQ * 6; // 5.4 seconds
-    localparam logic [31:0] FIRST_RESET_DELAY_COUNT = MASTER_CLK_FREQ * 1; // 2 seconds
-    localparam logic [31:0] SECOND_RESET_DELAY_COUNT = MASTER_CLK_FREQ * 3; // 0.5 seconds
+    // JVS_SIM_FAST (simulation only, e.g. +define+JVS_SIM_FAST): long startup / reset
+    // delays and the answer timeout are divided to keep regression runs short.
+`ifdef JVS_SIM_FAST
+    localparam int SIM_DELAY_DIV = 50;
+`else
+    localparam int SIM_DELAY_DIV = 1;
+`endif
+    localparam logic [31:0] INIT_DELAY_COUNT = MASTER_CLK_FREQ * 6 / SIM_DELAY_DIV; // 6 seconds
+    localparam logic [31:0] FIRST_RESET_DELAY_COUNT = MASTER_CLK_FREQ * 1 / SIM_DELAY_DIV; // 1 second
+    localparam logic [31:0] SECOND_RESET_DELAY_COUNT = MASTER_CLK_FREQ * 3 / SIM_DELAY_DIV; // 3 seconds
     localparam logic [15:0] TX_SETUP_DELAY_COUNT = MASTER_CLK_FREQ / 100_000; // ~10µs
     localparam logic [15:0] TX_HOLD_DELAY_COUNT = MASTER_CLK_FREQ / 33_333; // ~30µs
-    localparam logic [31:0] RX_TIMEOUT_COUNT = MASTER_CLK_FREQ * 2; // 1s (augmenté pour le parsing des features)
+    localparam logic [31:0] RX_TIMEOUT_COUNT = MASTER_CLK_FREQ * 2 / SIM_DELAY_DIV; // 2 s (augmenté pour le parsing des features)
     localparam logic [31:0] POLL_INTERVAL_COUNT = MASTER_CLK_FREQ / 1_000; // 1ms
     localparam logic [31:0] SETADDR_TO_IOIDENT_DELAY = MASTER_CLK_FREQ / 500; // 2ms delay after SETADDR
     localparam logic [31:0] IOIDENT_TO_CMDREV_DELAY = MASTER_CLK_FREQ / 1000; // 1ms delay after IOIDENT
@@ -264,6 +348,9 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     localparam STATE_TX_NEXT = 6'h1E;             // Generic TX byte advance state
     localparam STATE_RX_NEXT = 6'h1F;             // Generic RX byte advance state
     localparam STATE_FATAL_ERROR = 6'h20;         // Fatal error state - stops execution
+    localparam STATE_LINK_LOST = 6'h2E;           // SENSE lost while polling: wait for device return or re-init
+
+    localparam logic [31:0] RELINK_TIMEOUT_COUNT = (MASTER_CLK_FREQ / 1000) * RELINK_TIMEOUT_MS;
 
     //=========================================================================
     // RX PARSING STATES (6-bit states for complex response handling)
@@ -332,6 +419,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
 
     logic [3:0] current_coin;      // Current coin slot being parsed (0-3)
     logic [3:0] global_coin;      // Current coin slot being parsed (0-3)
+    logic [3:0] global_analog;    // First global analog channel of the node being parsed
     logic [1:0] temp_coin_condition;
     logic [5:0] temp_counter_msb;
 
@@ -340,6 +428,8 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     //=========================================================================
     // Structure to store information about each JVS node
     jvs_node_info_t jvs_nodes_r;
+
+    logic [7:0] dout_outputs, dout_bytes;
 
 //see comments in JVS_Debugger.qsf under [JVS project settings] 
 `ifdef USE_DUMMY_JVS_DATA
@@ -407,6 +497,8 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
     //=========================================================================  
     always @(posedge i_clk) begin
         jvs_data_ready_joy <= 1'b0; // signal for OSD
+        reinit_req <= 1'b0;         // pulse
+        com_timeout_flush <= 1'b0;  // pulse
 
         // Update delayed register for edge detection
         com_rx_complete_d <= com_rx_complete;
@@ -418,7 +510,9 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
         com_rx_next <= 1'b0;
         com_src_cmd_next <= 1'b0;
 
-        if (i_rst || !i_ena) begin
+        if (i_rst || !i_ena || link_lost || reinit_req) begin
+            sense_armed <= 1'b0;
+            rx_next_wait <= 1'b0;
             // Initialize edge detection register
             com_rx_complete_d <= 1'b0;
             // Initialize jvs_com control signals
@@ -456,6 +550,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
             analog_ch6 <= 16'h8000;            // Analog channel 6 centered
             analog_ch7 <= 16'h8000;            // Analog channel 7 centered
             analog_ch8 <= 16'h8000;            // Analog channel 8 centered
+            node_analog <= {(jvs_node_info_pkg::MAX_JVS_NODES*8){16'h8000}};
             player2_input_switch <= 16'h0000;  // All switches off
             player3_input_switch <= 16'h0000;  // All switches off
             player4_input_switch <= 16'h0000;  // All switches off
@@ -465,8 +560,10 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
             coin_count[1] <= 16'h0000;
             coin_count[2] <= 16'h0000;
             coin_count[3] <= 16'h0000;
+            coin_status <= '0;
 
             jvs_nodes_r.node_count <= 8'h00;
+            jvs_nodes_r.player_count <= 4'h0; // Accumulated during feature parsing: must restart from 0 on re-init
             current_device_addr <= 8'h01;    // Standard JVS device address
             polling_mode <= 1'b0;             // Start in initialization mode
             // Initialize JVS node information (single node only)
@@ -510,6 +607,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                             jvs_data_ready_joy <= 1'b1;
                             global_player <= 4'd0;
                             global_coin <= 4'd0;
+                            global_analog <= 4'd0;
                             delay_counter <= POLLING_INTERVAL_DELAY;
                             main_state <= STATE_MAIN_TIMER_DELAY;
                             return_state <= STATE_SEND_INPUTS;
@@ -526,6 +624,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                         jvs_data_ready_joy <= 1'b1;
                         global_player <= 4'd0;
                         global_coin <= 4'd0;
+                            global_analog <= 4'd0;
                         // If we have only one node set a polling delay
                         delay_counter <= POLLING_INTERVAL_DELAY;
                         main_state <= STATE_MAIN_TIMER_DELAY;
@@ -646,6 +745,11 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                     if (timeout_retry_count >= 8'd3 && jvs_nodes_r.node_count > 0) begin
                         // After 3 timeouts and at least 1 node configured: ignore i_sense and go to polling
                         on_timeout_state <= STATE_NODES_POOLING;
+                    end else if (timeout_retry_count >= 8'd2 && jvs_nodes_r.node_count == 0) begin
+                        // Nobody answers: restart from the bus reset, so that a device
+                        // plugged in the meantime (possibly still holding an old
+                        // address) is reset before being addressed
+                        on_timeout_state <= STATE_FIRST_RESET;
                     end else begin
                         // Normal timeout: retry SETADDR
                         on_timeout_state <= STATE_SEND_SETADDR;
@@ -656,8 +760,8 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                     // Send SET ADDRESS command using sequential byte transmission
                     return_state <= STATE_SEND_SETADDR; // STATE TO GO BACK from STATE_TX_NEXT
                     if (com_tx_ready) begin
-                        if (i_sense == 1'b0) begin
-                            // @TODO: Loop until i_sense goes high that indicate that all nodes are initialized
+                        if (sense_f == 1'b0) begin
+                            // @TODO: Loop until sense goes high that indicate that all nodes are initialized
                             // jvs_node_r <= current_device_addr
                             // current_device_addr <= current_device_addr + 1
                         end
@@ -868,6 +972,10 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // JVS REVISION REQUEST - Get JVS protocol revision
                 //-------------------------------------------------------------
                 STATE_SEND_JVSREV: begin
+                    // Configure timeout (it was never loaded here: WAIT_RX timed out
+                    // immediately, while the frame was still being transmitted)
+                    timeout_counter <= RX_TIMEOUT_COUNT;
+                    on_timeout_state <= STATE_SEND_JVSREV;         // On timeout: retry
                     // Send JVSREV command using sequential byte transmission
                     if (com_tx_ready) begin
                         com_dst_node <= current_device_addr; // 01
@@ -925,6 +1033,9 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 // COMMUNICATIONS VERSION REQUEST - Get communication version
                 //-------------------------------------------------------------
                 STATE_SEND_COMMVER: begin
+                    // Configure timeout (it was never loaded here, see STATE_SEND_JVSREV)
+                    timeout_counter <= RX_TIMEOUT_COUNT;
+                    on_timeout_state <= STATE_SEND_COMMVER;        // On timeout: retry
                     // Send COMMVER command using sequential byte transmission
                     if (com_tx_ready) begin
                         // Initialize command parameters on first entry
@@ -987,8 +1098,9 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                     timeout_counter <= RX_TIMEOUT_COUNT;           // Set timeout value
                     on_timeout_state <= STATE_SEND_FEATCHK;        // On timeout: retry immediately
 
-                    // Configure success state based on i_sense (more nodes to configure?)
-                    if (i_sense == 1'b0) begin
+                    // Configure success state based on sense (more nodes to configure?)
+                    // and on the node storage size (never address more than MAX_JVS_NODES)
+                    if (sense_f == 1'b0 && current_device_addr < jvs_node_info_pkg::MAX_JVS_NODES) begin
                         // More nodes to configure - go to SETADDR for next node after feature parsing
                         on_success_state <= STATE_SEND_SETADDR;
                     end else begin
@@ -1056,30 +1168,30 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     // If going to SETADDR for next node, increment device address
                                     if (on_success_state == STATE_SEND_SETADDR) begin
                                         // Initializer next node
-                                        jvs_nodes_r.node_id[current_device_addr + 1] <= current_device_addr + 1;
-                                        jvs_nodes_r.node_cmd_ver[current_device_addr + 1] <= 8'h00;
-                                        jvs_nodes_r.node_jvs_ver[current_device_addr + 1] <= 8'h00;
-                                        jvs_nodes_r.node_com_ver[current_device_addr + 1] <= 8'h00;
-                                        jvs_nodes_r.node_players[current_device_addr + 1] <= 4'h0;
-                                        jvs_nodes_r.node_buttons[current_device_addr + 1] <= 8'h0;
-                                        jvs_nodes_r.node_analog_channels[current_device_addr + 1] <= 4'h0;
-                                        jvs_nodes_r.node_rotary_channels[current_device_addr + 1] <= 4'h0;
-                                        jvs_nodes_r.node_has_keycode_input[current_device_addr + 1] <= 1'b0;
+                                        jvs_nodes_r.node_id[current_device_addr] <= current_device_addr + 1;
+                                        jvs_nodes_r.node_cmd_ver[current_device_addr] <= 8'h00;
+                                        jvs_nodes_r.node_jvs_ver[current_device_addr] <= 8'h00;
+                                        jvs_nodes_r.node_com_ver[current_device_addr] <= 8'h00;
+                                        jvs_nodes_r.node_players[current_device_addr] <= 4'h0;
+                                        jvs_nodes_r.node_buttons[current_device_addr] <= 8'h0;
+                                        jvs_nodes_r.node_analog_channels[current_device_addr] <= 4'h0;
+                                        jvs_nodes_r.node_rotary_channels[current_device_addr] <= 4'h0;
+                                        jvs_nodes_r.node_has_keycode_input[current_device_addr] <= 1'b0;
                                         // Initialize has_screen_pos output
-                                        jvs_nodes_r.node_has_screen_pos[current_device_addr + 1] <= 1'b0;
-                                        jvs_nodes_r.node_screen_pos_x_bits[current_device_addr + 1] <= 8'h0;
-                                        jvs_nodes_r.node_screen_pos_y_bits[current_device_addr + 1] <= 8'h0;
-                                        jvs_nodes_r.node_misc_digital_inputs[current_device_addr + 1] <= 16'h0;
+                                        jvs_nodes_r.node_has_screen_pos[current_device_addr] <= 1'b0;
+                                        jvs_nodes_r.node_screen_pos_x_bits[current_device_addr] <= 8'h0;
+                                        jvs_nodes_r.node_screen_pos_y_bits[current_device_addr] <= 8'h0;
+                                        jvs_nodes_r.node_misc_digital_inputs[current_device_addr] <= 16'h0;
                                         // Output capabilities
-                                        jvs_nodes_r.node_digital_outputs[current_device_addr + 1] <= 8'h0;
-                                        jvs_nodes_r.node_analog_output_channels[current_device_addr + 1] <= 4'h0;
-                                        jvs_nodes_r.node_card_system_slots[current_device_addr + 1] <= 8'h0;
-                                        jvs_nodes_r.node_medal_hopper_channels[current_device_addr + 1] <= 8'h0;
-                                        jvs_nodes_r.node_has_char_display[current_device_addr + 1] <= 1'b0;
-                                        jvs_nodes_r.node_char_display_width[current_device_addr + 1] <= 8'h0;
-                                        jvs_nodes_r.node_char_display_height[current_device_addr + 1] <= 8'h0;
-                                        jvs_nodes_r.node_char_display_type[current_device_addr + 1] <= 8'h0;
-                                        jvs_nodes_r.node_has_backup[current_device_addr + 1] <= 1'b0;
+                                        jvs_nodes_r.node_digital_outputs[current_device_addr] <= 8'h0;
+                                        jvs_nodes_r.node_analog_output_channels[current_device_addr] <= 4'h0;
+                                        jvs_nodes_r.node_card_system_slots[current_device_addr] <= 8'h0;
+                                        jvs_nodes_r.node_medal_hopper_channels[current_device_addr] <= 8'h0;
+                                        jvs_nodes_r.node_has_char_display[current_device_addr] <= 1'b0;
+                                        jvs_nodes_r.node_char_display_width[current_device_addr] <= 8'h0;
+                                        jvs_nodes_r.node_char_display_height[current_device_addr] <= 8'h0;
+                                        jvs_nodes_r.node_char_display_type[current_device_addr] <= 8'h0;
+                                        jvs_nodes_r.node_has_backup[current_device_addr] <= 1'b0;
 
                                         current_device_addr <= current_device_addr + 1;
                                     end
@@ -1196,6 +1308,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                     if (polling_mode == 1'b0) begin
                         global_player <= 4'd0;
                         global_coin <= 4'd0;
+                            global_analog <= 4'd0;
                         jvs_data_ready_init <= 1'b1;
                     end
                     polling_mode <= 1'b1;
@@ -1454,57 +1567,53 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
                 // @TODO: Card system not supported
                 // @TODO: Medal Hopper not supported (CMD_PAYCNT),(PAYINC),
+                //-------------------------------------------------------------
+                // GENERAL PURPOSE OUTPUT 1 (32): [32] [byte count N] [N data bytes]
+                // N = ceil(digital outputs / 8) (1..3). Output bits: first data byte bit 7
+                // = output 1. output_digital_ch1[7:0] -> data byte 1 (outputs 1-8),
+                // output_digital_ch1[15:8] -> data byte 2 (outputs 9-16), byte 3 = 0.
+                // Sent to every node declaring digital outputs.
+                //-------------------------------------------------------------
                 STATE_SEND_OUTPUT_DIGITAL: begin // (CMD_OUTPUT1) @TODO: (CMD_OUTPUT2),(CMD_OUTPUT3)
-                    // Check if device has digital outputs
                     if (jvs_nodes_r.node_digital_outputs[current_device_addr - 1] > 0) begin
-                        if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
-                            // Single player mode (Time Crisis style) - Send OUTPUT1 command using sequential byte transmission
-                            if (com_tx_ready) begin
-                                // Initialize command parameters on first entry
-                                if (cmd_pos == 0) begin
-                                    com_dst_node <= current_device_addr;
-                                    return_state <= STATE_SEND_OUTPUT_DIGITAL;
+                        if (com_tx_ready) begin
+                            if (cmd_pos == 0) begin
+                                com_dst_node <= current_device_addr;
+                                return_state <= STATE_SEND_OUTPUT_DIGITAL;
+                            end
+                            case (cmd_pos)
+                                3'd0: begin
+                                    com_tx_data <= CMD_OUTPUT1;       // OUTPUT1 command (0x32)
+                                    com_tx_cmd_push <= 1'b1;
+                                    main_state <= STATE_TX_NEXT;
                                 end
-
-                                // Select byte and signal based on position
-                                case (cmd_pos)
-                                    3'd0: begin
-                                        com_tx_data <= CMD_OUTPUT1;       // OUTPUT1 command (0x32)
-                                        com_tx_cmd_push <= 1'b1;         // Push as command
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    3'd1: begin
-                                        com_tx_data <= 8'h03;            // send 3 bytes
-                                        com_tx_data_push <= 1'b1;        // Push as data
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    3'd2: begin
-                                        com_tx_data <= output_digital_ch1[7:0]; // Set GPIO1 to current value from SNAC
-                                        com_tx_data_push <= 1'b1;        // Push as data
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    3'd3: begin
-                                        com_tx_data <= output_digital_ch1[15:8]; // Use MSB from SNAC module
-                                        com_tx_data_push <= 1'b1;        // Push as data
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    3'd4: begin
-                                        com_tx_data <= 8'h00;
-                                        com_tx_data_push <= 1'b1;        // Push as data
-                                        main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
-                                    end
-                                    default: begin
-                                        // All bytes sent, transition to finalize
+                                3'd1: begin
+                                    com_tx_data <= dout_bytes;        // byte count
+                                    com_tx_data_push <= 1'b1;
+                                    main_state <= STATE_TX_NEXT;
+                                end
+                                3'd2, 3'd3, 3'd4: begin
+                                    if (cmd_pos - 2 < dout_bytes) begin
+                                        case (cmd_pos)
+                                            3'd2:    com_tx_data <= output_digital_ch1[7:0];
+                                            3'd3:    com_tx_data <= output_digital_ch1[15:8];
+                                            default: com_tx_data <= 8'h00;
+                                        endcase
+                                        com_tx_data_push <= 1'b1;
+                                        main_state <= STATE_TX_NEXT;
+                                    end else begin
                                         cmd_pos <= 8'd0;
                                         main_state <= STATE_SEND_OUTPUT_ANALOG;
                                         current_channel <= 8'd0;
                                     end
-                                endcase
-                            end
-                        end else begin
-                            cmd_pos <= 8'd0;
-                            main_state <= STATE_SEND_OUTPUT_ANALOG;
-                            current_channel <= 8'd0;
+                                end
+                                default: begin
+                                    // All bytes sent, transition to finalize
+                                    cmd_pos <= 8'd0;
+                                    main_state <= STATE_SEND_OUTPUT_ANALOG;
+                                    current_channel <= 8'd0;
+                                end
+                            endcase
                         end
                     end else begin
                         cmd_pos <= 8'd0;
@@ -1512,7 +1621,10 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                         current_channel <= 8'd0;
                     end
                 end
-                // Analog Output not supported (CMD_ANLOUT)
+                //-------------------------------------------------------------
+                // ANALOG OUTPUT (33): [33] [channels N] [MSB LSB] x N
+                // N = analog output channels declared by the node (feature 13)
+                //-------------------------------------------------------------
                 STATE_SEND_OUTPUT_ANALOG: begin // (CMD_ANLOUT)
                     // Check if device has analog outputs
                     if (jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] > 0) begin
@@ -1529,7 +1641,7 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     case (cmd_pos)
                                         3'd0: begin
                                             current_channel <= 0;
-                                            com_tx_data <= CMD_ANLOUT;       // OUTPUT1 command (0x33)
+                                            com_tx_data <= CMD_ANLOUT;       // ANLOUT command (0x33)
                                             com_tx_cmd_push <= 1'b1;         // Push as command
                                             main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                         end
@@ -1539,12 +1651,12 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                             main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                         end
                                         3'd2: begin
-                                            com_tx_data <= 8'h00;           // Channel N MSB (@TODO: send null value at the momment)
+                                            com_tx_data <= (current_channel < 8) ? output_analog[current_channel[2:0]*16 + 8 +: 8] : 8'h00; // Channel MSB
                                             com_tx_data_push <=1'b1 ;       // Push data
                                             main_state <= STATE_TX_NEXT;    // Go to TX_NEXT
                                         end
                                         3'd3: begin
-                                            com_tx_data <= 8'h00;            // Channel N LSB (@TODO: send null value at the momment)
+                                            com_tx_data <= (current_channel < 8) ? output_analog[current_channel[2:0]*16 +: 8] : 8'h00;     // Channel LSB
                                             com_tx_data_push <= 1'b1;       // Push data
                                             main_state <= STATE_TX_NEXT;     // Go to TX_NEXT
                                             current_channel <= current_channel + 1;
@@ -1770,9 +1882,9 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         end
                                     end
                                     3'd1: begin
-                                        // Dispatch to specialized COININP state
-                                        current_coin <= 0; // Initialize coin counter for parsing
-                                        cmd_pos <= 0;
+                                        // com_rx_byte = first coin data byte
+                                        current_coin <= 0;
+                                        return_state <= RX_PARSE_COININP;
                                         main_state <= RX_PARSE_COININP;
                                     end
                                 endcase
@@ -1794,9 +1906,8 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                         end
                                     end
                                     3'd1: begin
-                                        // Dispatch to specialized ANLINP state
-                                        cmd_pos <= 1; // Start at cmd_pos=1 for first analog byte
-                                        current_channel <= 0; // Initialize channel counter
+                                        // com_rx_byte = first analog data byte (MSB of channel 0)
+                                        current_channel <= 0;
                                         return_state <= RX_PARSE_ANLINP;
                                         main_state <= RX_PARSE_ANLINP;
                                     end
@@ -1914,11 +2025,24 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                     end
                                 endcase
                             end
+                            CMD_ANLOUT: begin
+                                // ANLOUT answer has no data: check the REPORT byte, advance the
+                                // command FIFO and read the next command's REPORT byte
+                                com_src_cmd_next <= 1'b1;
+                                cmd_pos <= 8'hFF;                    // RX_NEXT brings it back to 0
+                                return_state <= RX_PARSE_INPUT_CMD;
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
                             CMD_OUTPUT1: begin
                                 case(cmd_pos)
                                     3'd0: begin
-                                        // Check REPORT byte
+                                        // Check REPORT byte. The OUTPUT1 answer has no data: advance
+                                        // the command FIFO and read the next command's REPORT byte
+                                        // (cmd_pos 0xFF + RX_NEXT -> dispatcher at cmd_pos 0)
                                         if (com_rx_byte == REPORT_NORMAL) begin
+                                            com_src_cmd_next <= 1'b1;
+                                            cmd_pos <= 8'hFF;
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
@@ -1967,13 +2091,15 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 RX_PARSE_SWINP: begin
                     return_state <= RX_PARSE_SWINP;
                     if (current_player >= jvs_nodes_r.node_players[current_device_addr - 1]) begin
-                        // We finished parsing node players
+                        // We finished parsing node players. com_rx_byte is already the next
+                        // command's REPORT byte: back to the dispatcher at cmd_pos 0 without
+                        // reading (short delay so that the command FIFO has advanced)
                         global_player <= global_player + jvs_nodes_r.node_players[current_device_addr - 1];
                         cmd_pos <= 0;
                         com_src_cmd_next <= 1'b1;
+                        delay_counter <= 32'd2;
                         return_state <= RX_PARSE_INPUT_CMD;
-                        main_state <= STATE_RX_NEXT;
-                        com_rx_next <= 1'b1;
+                        main_state <= STATE_MAIN_TIMER_DELAY;
                     end else begin
                         case (global_player + current_player)
                             4'd0: begin // Player 1
@@ -2131,135 +2257,114 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end
                 end
 
-                RX_PARSE_COININP: begin // E0 00 1F 01 01 00 00 00 00 00 01 00 0A 80 00
-                    if (com_rx_remaining > 0) begin
-                        // Check if we need to parse the next coin slot
-                        if (current_coin >= jvs_nodes_r.node_coin_slots[current_device_addr - 1]) begin
-                            // Coin parsing complete, advance to next command
-                            global_coin <= global_coin + jvs_nodes_r.node_coin_slots[current_device_addr - 1];
-                            cmd_pos <= 0;
-                            com_src_cmd_next <= 1'b1;
-                            return_state <= RX_PARSE_INPUT_CMD;
-                            main_state <= STATE_RX_NEXT;
-                            com_rx_next <= 1'b1;
-                        end else begin
-                            // Parse coin data (2 bytes per coin slot)
-                            case (cmd_pos)
-                                3'd0: begin // Parse byte 1 of current coin slot
-                                    // Format: [condition(2 bits) counter_MSB(6 bits)]
-                                    temp_coin_condition <= com_rx_byte[7:6];  // Top 2 bits = condition
-                                    temp_counter_msb <= com_rx_byte[5:0];     // Bottom 6 bits = counter MSB
-                                    return_state <= RX_PARSE_COININP;
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
+                //-------------------------------------------------------------
+                // COIN (21) and ANALOG (22) INPUTS: 2 bytes per element.
+                // Entered from the dispatcher at cmd_pos 1 with com_rx_byte = first data byte
+                // (the REPORT byte was checked at cmd_pos 0). Same structure as RX_PARSE_SWINP:
+                // byte 1 at cmd_pos 1, byte 2 at cmd_pos 2, next element back at cmd_pos 1;
+                // when all elements are parsed, com_rx_byte is the next command's REPORT byte
+                // and the dispatcher is resumed at cmd_pos 0 without reading.
+                //-------------------------------------------------------------
+                RX_PARSE_COININP: begin
+                    return_state <= RX_PARSE_COININP;
+                    if (current_coin >= jvs_nodes_r.node_coin_slots[current_device_addr - 1]) begin
+                        global_coin <= global_coin + jvs_nodes_r.node_coin_slots[current_device_addr - 1];
+                        current_coin <= 0;
+                        cmd_pos <= 0;
+                        com_src_cmd_next <= 1'b1;
+                        delay_counter <= 32'd2;
+                        return_state <= RX_PARSE_INPUT_CMD;
+                        main_state <= STATE_MAIN_TIMER_DELAY;
+                    end else begin
+                        case (cmd_pos)
+                            3'd1: begin // Byte 1: condition (2 bits) + counter MSB (6 bits)
+                                temp_coin_condition <= com_rx_byte[7:6];
+                                temp_counter_msb <= com_rx_byte[5:0];
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                            3'd2: begin // Byte 2: counter LSB, slot complete
+                                if (global_coin + current_coin < 4)
+                                    coin_status[(global_coin + current_coin) * 16 +: 16] <= {temp_coin_condition, temp_counter_msb, com_rx_byte};
+                                if ({temp_counter_msb, com_rx_byte} > coin_count[global_coin + current_coin]) begin
+                                    coin_count[global_coin + current_coin] <= coin_count[global_coin + current_coin] + 1;
+                                    case (global_coin + current_coin)
+                                        0: coin1 <= 1'b1;
+                                        1: coin2 <= 1'b1;
+                                        2: coin3 <= 1'b1;
+                                        3: coin4 <= 1'b1;
+                                    endcase
+                                end else begin
+                                    case (global_coin + current_coin)
+                                        0: coin1 <= 1'b0;
+                                        1: coin2 <= 1'b0;
+                                        2: coin3 <= 1'b0;
+                                        3: coin4 <= 1'b0;
+                                    endcase
                                 end
-                                3'd1: begin // Parse byte 2 of current coin slot then jump to next slot if needed
-                                    // Store complete coin data for this slot
-                                    if({temp_counter_msb, com_rx_byte} > coin_count[global_coin + current_coin]) begin
-                                        coin_count[global_coin + current_coin] <= coin_count[global_coin + current_coin] + 1;
-                                        case (global_coin + current_coin)
-                                            0: coin1 <= 1'b1;
-                                            1: coin2 <= 1'b1;
-                                            2: coin3 <= 1'b1;
-                                            3: coin4 <= 1'b1;
-                                        endcase                                        
-                                    end else begin
-                                        case (global_coin + current_coin)
-                                            0: coin1 <= 1'b0;
-                                            1: coin2 <= 1'b0;
-                                            2: coin3 <= 1'b0;
-                                            3: coin4 <= 1'b0;
-                                        endcase
-                                    end
-                                    // Parse next coin slot
-                                    current_coin <= current_coin + 1;
-                                    cmd_pos <= 0; // Reset to parse next coin's first byte
-                                    return_state <= RX_PARSE_COININP;
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
-                                end
-                            endcase
-                        end
+                                current_coin <= current_coin + 1;
+                                cmd_pos <= 0;               // RX_NEXT brings it back to 1
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
+                            end
+                        endcase
                     end
                 end
 
                 RX_PARSE_ANLINP: begin
                     return_state <= RX_PARSE_ANLINP;
-                    if (com_rx_remaining > 0) begin
+                    if (current_channel >= jvs_nodes_r.node_analog_channels[current_device_addr - 1]) begin
+                        global_analog <= global_analog + jvs_nodes_r.node_analog_channels[current_device_addr - 1];
+                        current_channel <= 0;
+                        cmd_pos <= 0;
+                        com_src_cmd_next <= 1'b1;
+                        delay_counter <= 32'd2;
+                        return_state <= RX_PARSE_INPUT_CMD;
+                        main_state <= STATE_MAIN_TIMER_DELAY;
+                    end else begin
                         case (cmd_pos)
-                            3'd1: begin // Parse byte 1 of current coin slot
+                            3'd1: begin // MSB of current channel
                                 temp_high_byte <= com_rx_byte;
-                                // Put MSB in temp
                                 main_state <= STATE_RX_NEXT;
                                 com_rx_next <= 1'b1;
                             end
-                            3'd2: begin // Parse byte 2 of current channel then jump to next channel if needed
-                                // Assign analog values based on current channel
-                                case (current_channel)
-                                    4'd0: begin // Channel 1 - Analog channel 1
-                                        analog_ch1 <= {temp_high_byte, com_rx_byte};
-                                    end
-                                    4'd1: begin // Channel 2 - Analog channel 2
-                                        analog_ch2 <= {temp_high_byte, com_rx_byte};
-                                    end
-                                    4'd2: begin // Channel 3 - Analog channel 3
-                                        analog_ch3 <= {temp_high_byte, com_rx_byte};
-                                        // Also update screen position if single player for compatibility
-                                        if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
-                                            screen_pos_x <= {temp_high_byte, com_rx_byte};
-                                        end
-                                    end
-                                    4'd3: begin // Channel 4 - Analog channel 4
-                                        analog_ch4 <= {temp_high_byte, com_rx_byte};
-                                        // Also update screen position if single player for compatibility
-                                        if (jvs_nodes_r.node_players[current_device_addr - 1] == 1) begin
-                                            screen_pos_y <= {temp_high_byte, com_rx_byte};
-                                        end
-                                    end
-                                    4'd4: begin // Channel 5 - Analog channel 5
-                                        analog_ch5 <= {temp_high_byte, com_rx_byte};
-                                        screen_pos_x <= {temp_high_byte, com_rx_byte}; // Keep screen compatibility
-                                    end
-                                    4'd5: begin // Channel 6 - Analog channel 6
-                                        analog_ch6 <= {temp_high_byte, com_rx_byte};
-                                        screen_pos_y <= {temp_high_byte, com_rx_byte}; // Keep screen compatibility
-                                    end
-                                    4'd6: begin // Channel 7 - Analog channel 7
-                                        analog_ch7 <= {temp_high_byte, com_rx_byte};
-                                    end
-                                    4'd7: begin // Channel 8 - Analog channel 8
-                                        analog_ch8 <= {temp_high_byte, com_rx_byte};
-                                    end
-                                    default: ; // Additional channels - no assignment
+                            3'd2: begin // LSB of current channel, channel complete
+                                // Channels of chained nodes are stored one after the other:
+                                // global channel = channels of previous nodes + local channel
+                                case (global_analog + current_channel)
+                                    4'd0: analog_ch1 <= {temp_high_byte, com_rx_byte};
+                                    4'd1: analog_ch2 <= {temp_high_byte, com_rx_byte};
+                                    4'd2: analog_ch3 <= {temp_high_byte, com_rx_byte};
+                                    4'd3: analog_ch4 <= {temp_high_byte, com_rx_byte};
+                                    4'd4: analog_ch5 <= {temp_high_byte, com_rx_byte};
+                                    4'd5: analog_ch6 <= {temp_high_byte, com_rx_byte};
+                                    4'd6: analog_ch7 <= {temp_high_byte, com_rx_byte};
+                                    4'd7: analog_ch8 <= {temp_high_byte, com_rx_byte};
+                                    default: ; // Beyond 8 global channels - no assignment
                                 endcase
 
-                                // Check if we need to parse the next channel
-                                if (current_channel >= (jvs_nodes_r.node_analog_channels[current_device_addr - 1])) begin
-                                    // Analog channels parsing complete, advance to next command
-                                    current_channel <= 0;
-                                    cmd_pos <= 0;
-                                    return_state <= RX_PARSE_INPUT_CMD;
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
-                                    com_src_cmd_next <= 1'b1;
-                                end else begin
-                                    // Parse next channel
-                                    current_channel <= current_channel + 1;
-                                    cmd_pos <= 0; // Reset to parse next channel's first byte
-                                    return_state <= RX_PARSE_ANLINP;
-                                    main_state <= STATE_RX_NEXT;
-                                    com_rx_next <= 1'b1;
-                                end
+                                // Per node copy (debug/display)
+                                if (current_device_addr != 0 && current_device_addr <= jvs_node_info_pkg::MAX_JVS_NODES && current_channel < 8)
+                                    node_analog[((current_device_addr - 1) * 8 + current_channel) * 16 +: 16] <= {temp_high_byte, com_rx_byte};
+
+                                // Screen position compatibility (same channels as the previous
+                                // builds: channels 1/2 for single player boards, 3/4 always)
+                                case (current_channel)
+                                    8'd1: if (jvs_nodes_r.node_players[current_device_addr - 1] == 1)
+                                              screen_pos_x <= {temp_high_byte, com_rx_byte};
+                                    8'd2: if (jvs_nodes_r.node_players[current_device_addr - 1] == 1)
+                                              screen_pos_y <= {temp_high_byte, com_rx_byte};
+                                    8'd3: screen_pos_x <= {temp_high_byte, com_rx_byte};
+                                    8'd4: screen_pos_y <= {temp_high_byte, com_rx_byte};
+                                    default: ;
+                                endcase
+
+                                current_channel <= current_channel + 1;
+                                cmd_pos <= 0;               // RX_NEXT brings it back to 1
+                                main_state <= STATE_RX_NEXT;
+                                com_rx_next <= 1'b1;
                             end
                         endcase
-                    end else begin
-                        // No more data
-                        cmd_pos <= 0;
-                        current_channel <= 0;
-                        com_src_cmd_next <= 1'b1;
-                        return_state <= RX_PARSE_INPUT_CMD;
-                        main_state <= STATE_RX_NEXT;
-                        com_rx_next <= 1'b1;
                     end
                 end
 
@@ -2451,20 +2556,9 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                                 CMD_JVSREV: main_state <= RX_PARSE_JVSREV;
                                 CMD_COMMVER: main_state <= RX_PARSE_COMMVER;
                                 CMD_FEATCHK: main_state <= RX_PARSE_FEATURES;
-                                CMD_ANLINP: begin
-                                    // Initialize analog parsing variables
-                                    analog_ch1 <= 16'h8000;
-                                    analog_ch2 <= 16'h8000;
-                                    analog_ch3 <= 16'h8000;
-                                    analog_ch4 <= 16'h8000;
-                                    analog_ch5 <= 16'h8000;
-                                    analog_ch6 <= 16'h8000;
-                                    analog_ch7 <= 16'h8000;
-                                    analog_ch8 <= 16'h8000;
-                                    current_channel <= 4'd0;
-                                    cmd_pos <= 1; // Initialize to 1 for generic parsing (STATE_RX_NEXT returns to 1, not 0)
-                                    main_state <= RX_PARSE_ANLINP;
-                                end
+                                // Input commands (ANLINP included) go through the unified parser,
+                                // which checks the REPORT byte. Analog channels are NOT re-centered:
+                                // each one is updated atomically by the parser.
                                 default: main_state <= RX_PARSE_INPUT_CMD; // For other commands, use unified parser
                             endcase
                         end else begin
@@ -2483,9 +2577,21 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                     end else if (timeout_counter > 0) begin
                         timeout_counter <= timeout_counter - 1;
                     end else begin
-                        // Timeout reached - increment retry count and go to configured timeout state
-                        timeout_retry_count <= timeout_retry_count + 1;
+                        // Timeout reached - increment retry count (saturating, so that
+                        // o_bus_state stays in JVS_ERROR) and go to configured timeout state
+                        if (timeout_retry_count != 8'hFF)
+                            timeout_retry_count <= timeout_retry_count + 1;
                         main_state <= on_timeout_state;
+                        // The commands of the unanswered frame stay in the jvs_com command
+                        // FIFO: a later answer would be parsed with them (and the FIFO ends
+                        // up full). Drop them.
+                        com_timeout_flush <= 1'b1;
+                        // While polling, no answer means the device was reset / power cycled
+                        // (SENSE "not addressed", SETUP LED lit) or is gone: restart the whole
+                        // init sequence (immediately if SENSE says it lost its address,
+                        // otherwise after 3 consecutive timeouts)
+                        if (polling_mode && (!sense_f || timeout_retry_count >= 8'd2))
+                            reinit_req <= 1'b1;
                     end
                 end
 
@@ -2523,8 +2629,14 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 end
                 STATE_RX_NEXT: begin
                     com_rx_next <= 0;
-                    // Wait for BRAM read to complete (com_rx_ready = 1)
-                    if (com_rx_ready) begin
+                    // jvs_com samples rx_next during the first cycle spent here and only
+                    // clears rx_ready at the end of it: the rx_ready seen in that first cycle
+                    // is the one of the previous byte. Skip it, then wait for the BRAM read
+                    // to complete (com_rx_ready = 1): com_rx_byte is then the NEXT byte.
+                    if (!rx_next_wait) begin
+                        rx_next_wait <= 1'b1;
+                    end else if (com_rx_ready) begin
+                        rx_next_wait <= 1'b0;
                         cmd_pos <= cmd_pos + 1;
                         main_state <= return_state;
                     end
@@ -2583,12 +2695,110 @@ module jvs_ctrl #(parameter MASTER_CLK_FREQ = 50_000_000)
                 //-------------------------------------------------------------
                 // DEFAULT - Unknown state, go to fatal error
                 //-------------------------------------------------------------
+                //-------------------------------------------------------------
+                // LINK LOST - SENSE went back to "not addressed" while polling
+                //-------------------------------------------------------------
+                STATE_LINK_LOST: begin
+                    if (sense_f) begin
+                        // Device is back and still holds its address: resume polling
+                        // (address = node_count makes NODES_POOLING restart at node 1)
+                        current_device_addr <= jvs_nodes_r.node_count;
+                        timeout_retry_count <= 8'h00;
+                        delay_counter <= 32'h0;
+                        main_state <= STATE_NODES_POOLING;
+                    end else if (delay_counter < RELINK_TIMEOUT_COUNT) begin
+                        delay_counter <= delay_counter + 1;
+                    end else begin
+                        // Not back (or power cycled, lost its address): full re-init
+                        reinit_req <= 1'b1;
+                    end
+                end
+
+                //-------------------------------------------------------------
+                // DEFAULT - Unknown state, go to fatal error
+                //-------------------------------------------------------------
                 default: begin
                     $display("[CONTROLLER][FATAL_ERROR] Unknown state 0x%02X - entering fatal error state", main_state);
                     main_state <= STATE_FATAL_ERROR;
                 end
             endcase
+
+            // RX_NEXT first-cycle flag only lives while in STATE_RX_NEXT
+            if (main_state != STATE_RX_NEXT)
+                rx_next_wait <= 1'b0;
+
+            //-----------------------------------------------------------------
+            // SENSE based link supervision (overrides the state machine)
+            //-----------------------------------------------------------------
+            if (polling_mode && sense_f) begin
+                // SENSE reports all devices addressed while polling: it can be trusted
+                sense_armed <= 1'b1;
+            end
+
+            if (sense_armed && !sense_f && main_state != STATE_LINK_LOST) begin
+                // Device unplugged (or reset): stop talking and release all inputs
+                main_state <= STATE_LINK_LOST;
+                delay_counter <= 32'h0;
+                player1_input_switch <= 16'h0000;
+                player2_input_switch <= 16'h0000;
+                player3_input_switch <= 16'h0000;
+                player4_input_switch <= 16'h0000;
+                analog_ch1 <= 16'h8000;
+                analog_ch2 <= 16'h8000;
+                analog_ch3 <= 16'h8000;
+                analog_ch4 <= 16'h8000;
+                analog_ch5 <= 16'h8000;
+                analog_ch6 <= 16'h8000;
+                analog_ch7 <= 16'h8000;
+                analog_ch8 <= 16'h8000;
+            end
         end
+    end
+
+    assign com_flush = (main_state == STATE_LINK_LOST);
+
+    // OUTPUT1 (32) data byte count for the current node: ceil(outputs / 8), limited to 1..3
+    assign dout_outputs = jvs_nodes_r.node_digital_outputs[current_device_addr - 1];
+    assign dout_bytes   = (dout_outputs > 8'd16) ? 8'd3 : (dout_outputs > 8'd8) ? 8'd2 : 8'd1;
+
+    //=========================================================================
+    // BUS STATE - High level view of the JVS link for the host core (OSD, LEDs...)
+    //=========================================================================
+    // The protocol phase is latched on the "anchor" states of each sequence, so
+    // that shared helper states (TX_NEXT, RX_NEXT, WAIT_RX, TIMER_DELAY) keep the
+    // phase of the sequence they belong to.
+    jvs_bus_state_t bus_phase;
+
+    always_ff @(posedge i_clk) begin
+        if (i_rst || !i_ena || link_lost || reinit_req) begin
+            bus_phase <= JVS_ADDRESSING;
+        end else begin
+            case (main_state)
+                STATE_INIT_DELAY,
+                STATE_FIRST_RESET,
+                STATE_SECOND_RESET,
+                STATE_SEND_SETADDR:  bus_phase <= JVS_ADDRESSING;
+                STATE_SEND_IOIDENT,
+                STATE_SEND_CMDREV,
+                STATE_SEND_JVSREV,
+                STATE_SEND_COMMVER,
+                STATE_SEND_FEATCHK:  bus_phase <= JVS_INIT;
+                STATE_SEND_INPUTS:   bus_phase <= JVS_READY;
+                STATE_LINK_LOST:     bus_phase <= JVS_LINK_LOST;
+                default:             bus_phase <= bus_phase;
+            endcase
+        end
+    end
+
+    always_ff @(posedge i_clk) begin
+        if (link_lost)
+            o_bus_state <= JVS_NO_DEVICE;
+        else if (bus_phase == JVS_LINK_LOST)
+            o_bus_state <= JVS_LINK_LOST;
+        else if (timeout_retry_count >= 8'd3)
+            o_bus_state <= JVS_ERROR;
+        else
+            o_bus_state <= bus_phase;
     end
 
 endmodule

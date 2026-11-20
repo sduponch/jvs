@@ -45,8 +45,19 @@ package jvs_node_info_pkg;
 		logic       node_has_backup [0:MAX_JVS_NODES-1];         // Backup data support (unknown usage)
 	} jvs_node_info_t;
 
+	// Global JVS bus state, combining the SENSE/LINK hardware lines with the
+	// controller state machine progress (exposed by jvs_ctrl.o_bus_state)
+	typedef enum logic [2:0] {
+		JVS_NO_DEVICE  = 3'd0,  // LINK inactive: nothing plugged on the JVS port (controller held idle)
+		JVS_ADDRESSING = 3'd1,  // Startup delay, bus reset and address assignment (SETADDR)
+		JVS_INIT       = 3'd2,  // Reading node identity, revisions and features
+		JVS_READY      = 3'd3,  // Input polling running
+		JVS_ERROR      = 3'd4,  // 3+ consecutive timeouts: a device is expected but does not answer
+		JVS_LINK_LOST  = 3'd5   // SENSE lost while polling: waiting for the device to come back (then re-init)
+	} jvs_bus_state_t;
+
 	typedef struct {
-		logic [1:0]  condition;    // Coin condition (00=normal, 01=decrease, 10=increase, 11=no_data) 
+		logic [1:0]  condition;   // Coin condition (00=normal, 01=decrease, 10=increase, 11=no_data) 
 		logic [13:0] counter;      // 14-bit coin counter (6 MSB + 8 LSB from protocol)
 	} jvs_coin_slot_t;
 
