@@ -24,7 +24,7 @@
 
 import jvs_node_info_pkg::*;
 
-module test_03_device_identification;
+module tb_smart_device;
 
     // Paramètres de test haute vitesse pour communication bidirectionnelle
     localparam MASTER_CLK_FREQ = 1_000_000;  // 1MHz pour réponses plus rapides
@@ -47,6 +47,7 @@ module test_03_device_identification;
     wire [15:0] p1_btn_state, p2_btn_state, p3_btn_state, p4_btn_state;
     wire [31:0] p1_joy_state, p2_joy_state;
     wire [15:0] screen_pos_x, screen_pos_y;
+    logic [7:0] vendor_rd_addr, vendor_rd_data;   // vendor init table (see vendor_mem)
     wire has_screen_pos;
     wire jvs_data_ready;
     jvs_node_info_t jvs_nodes;
@@ -69,35 +70,9 @@ module test_03_device_identification;
     integer polling_requests = 0; // Compteur de requêtes de polling
     logic [7:0] received_commands[0:15]; // Stockage des commandes reçues
 
-    // BRAM simulée pour les noms des devices
-    logic [7:0] name_bram [0:NAME_BRAM_SIZE-1];
-
-    // Initialisation de la BRAM avec des noms de test
-    initial begin
-        integer i;
-        string node0_name;
-        string node1_name;
-
-        // Effacer la BRAM
-        for (i = 0; i < NAME_BRAM_SIZE; i++) begin
-            name_bram[i] = 8'h00;
-        end
-
-        // Node 0: "SEGA ENTERPRISES,LTD.;I/O BD JVS;837-13551  ;Ver1.00;98/10"
-        node0_name = "SEGA ENTERPRISES,LTD.;I/O BD JVS;837-13551  ;Ver1.00;98/10";
-        for (i = 0; i < node0_name.len() && i < NODE_NAME_SIZE; i++) begin
-            name_bram[0 * NODE_NAME_SIZE + i] = node0_name[i];
-        end
-
-        // Node 1: "NAMCO LTD.;TEKKEN 6;Ver1.00;JPN"
-        node1_name = "NAMCO LTD.;TEKKEN 6;Ver1.00;JPN";
-        for (i = 0; i < node1_name.len() && i < NODE_NAME_SIZE; i++) begin
-            name_bram[1 * NODE_NAME_SIZE + i] = node1_name[i];
-        end
-    end
-
-    // Interface BRAM - simulation de lecture
-    assign node_name_rd_data = name_bram[node_name_rd_addr];
+    // Node names are read from the DUT name BRAM (node_name_rd_addr / node_name_rd_data).
+    // (A fake BRAM used to drive node_name_rd_data here as well: removed, it conflicted
+    // with the DUT output and showed a fake "SEGA ..." name in the log.)
 
     // Monitoring du signal RS485 direction
     logic rx485_dir_prev = 0;
@@ -127,6 +102,22 @@ module test_03_device_identification;
     assign uart_rx = device_to_jvs;      // RX du contrôleur
     assign sense = 1'b1;                 // Signal sense activé
 
+    // Digital output value sent by the controller (OUTPUT1 32): byte 1 = [7:0], byte 2 = [15:8]
+    localparam logic [15:0] TEST_DOUT = 16'h0480;
+    // Analog output values sent by the controller (ANLOUT 33), channels 0 and 1
+    localparam logic [15:0] TEST_AOUT0 = 16'hE000;
+    localparam logic [15:0] TEST_AOUT1 = 16'h1234;
+
+    // Simulated board answers (set to 0 to simulate a board that stops answering)
+    logic dev_respond = 1'b1;
+
+    // Input polling outputs of the DUT (checked against smart device EXP_* values)
+    jvs_bus_state_t bus_state;
+    wire [15:0] p1_sw, p2_sw;
+    wire [15:0] ana_ch [8];
+    wire [MAX_JVS_NODES*8*16-1:0] node_analog;
+    wire [4*16-1:0] coin_status;
+
     // Instance DUT - Utilisation de jvs_ctrl avec nouvelle API BRAM
     jvs_ctrl #(
         .MASTER_CLK_FREQ(MASTER_CLK_FREQ)
@@ -139,16 +130,225 @@ module test_03_device_identification;
         .o_uart_tx(uart_tx),
         .i_sense(sense),
         .o_rx485_dir(rx485_dir),
+        .i_link(1'b1),
+        .o_bus_state(bus_state),
+        .player1_input_switch(p1_sw), .player2_input_switch(p2_sw),
+        .player3_input_switch(),      .player4_input_switch(),
+        .analog_ch1(ana_ch[0]), .analog_ch2(ana_ch[1]), .analog_ch3(ana_ch[2]), .analog_ch4(ana_ch[3]),
+        .analog_ch5(ana_ch[4]), .analog_ch6(ana_ch[5]), .analog_ch7(ana_ch[6]), .analog_ch8(ana_ch[7]),
+        .node_analog(node_analog),
+        .coin_count(), .coin1(), .coin2(), .coin3(), .coin4(),
+        .coin_status(coin_status),
+        // node 1 has 2 players: OUTPUT1 = P1 | P2 = TEST_DOUT; P3 / P4 (no such player on the
+        // node) must not reach it
+        .p1_output_digital({16'h0000, TEST_DOUT[7:0]}),
+        .p2_output_digital({8'h00, TEST_DOUT[15:8], 8'h00}),
+        .p3_output_digital(24'hFFFFFF),
+        .p4_output_digital(24'hFFFFFF),
+        .output_node(8'd0),                     // every node
+        .output_analog({96'h0, TEST_AOUT1, TEST_AOUT0}),
+        .has_screen_pos(has_screen_pos), .screen_pos_x(screen_pos_x), .screen_pos_y(screen_pos_y),
         //.gpio_output_value(gpio_output_value),
         .jvs_data_ready(jvs_data_ready),
         .jvs_nodes(jvs_nodes),
         .node_name_rd_data(node_name_rd_data),
-        .node_name_rd_addr(node_name_rd_addr)
+        .node_name_rd_addr(node_name_rd_addr),
+        .vendor_rd_addr(vendor_rd_addr),
+        .vendor_rd_data(vendor_rd_data)
     );
+
+    //=========================================================================
+    // Input polling outputs (checked against the smart device EXP_* values)
+    //=========================================================================
+
+    // Expected player switch word from the 2 JVS switch bytes (jvs_ctrl mapping)
+    function automatic logic [15:0] exp_player_sw(input logic [15:0] b, input logic p2);
+        logic [15:0] w;
+        w[15] = b[15]; w[14] = b[14];                          // START, SERVICE
+        w[0]  = b[13]; w[1]  = b[12]; w[2] = b[11]; w[3] = b[10]; // UP DOWN LEFT RIGHT
+        w[4]  = b[9];  w[5]  = b[8];                           // push1, push2
+        w[6]  = b[7];  w[7]  = b[6];  w[8] = b[5]; w[9] = b[4]; w[10] = b[3]; w[11] = b[2];
+        w[12] = p2 ? 1'b0 : b[1];                              // P2: [13:12] cleared by jvs_ctrl
+        w[13] = p2 ? 1'b0 : b[0];
+        return w;
+    endfunction
+
+    // Expected node name (smart device IOIDENT answer)
+    // Vendor init table (jvs_ctrl vendor_rd_* ports), registered read like the core BRAM.
+    // Empty for the generic test; SMART_NAMCO loads the Time Crisis 4 table built by
+    // ../scripts/jvs_vendor.py (Makefile: vendor_namco_tc4.hex)
+    logic [7:0] vendor_mem [0:255];
+    always @(posedge clk) vendor_rd_data <= vendor_mem[vendor_rd_addr];
+    initial begin
+        for (int i = 0; i < 256; i++) vendor_mem[i] = 8'h00;
+`ifdef SMART_NAMCO
+        $readmemh("vendor_namco_tc4.hex", vendor_mem);
+`endif
+    end
+
+`ifdef SMART_NAMCO
+    localparam bit NAMCO = 1'b1;         // board model identifies as the Namco NA-JV
+    localparam string EXP_NAME = "namco ltd.;NA-JV;Ver1.00;JPN,Multipurpose.";
+`else
+    localparam bit NAMCO = 1'b0;
+    localparam string EXP_NAME = "No Brand;NAOMI Converter98701;ver2.0; ";
+`endif
+
+    int checks_failed = 0;
+    task automatic check(input string what, input logic [31:0] got, input logic [31:0] exp);
+        if (got === exp) $display("[CHECK] PASS  %-28s got 0x%0h", what, got);
+        else begin
+            $display("[CHECK] FAIL  %-28s got 0x%0h expected 0x%0h", what, got, exp);
+            checks_failed++;
+        end
+    endtask
+
+    task automatic run_checks(input string phase);
+        string name_got;
+        logic [7:0] ch;
+        $display("\n================ JVS CONTROLLER CHECKS (%s) ================", phase);
+        // Identification
+        check("CMD revision",  jvs_nodes.node_cmd_ver[0], 8'h13);
+        check("JVS revision",  jvs_nodes.node_jvs_ver[0], 8'h30);
+        check("COM version",   jvs_nodes.node_com_ver[0], 8'h10);
+        name_got = "";
+        for (int i = 0; i < NODE_NAME_SIZE; i++) begin
+            node_name_rd_addr = i;
+            repeat (2) @(posedge clk);
+            ch = node_name_rd_data;
+            if (ch == 8'h00) break;
+            name_got = {name_got, (ch >= 8'h20 && ch < 8'h7F) ? string'(ch) : $sformatf("<%02x>", ch)};
+        end
+        if (name_got == EXP_NAME) $display("[CHECK] PASS  %-28s \"%s\"", "node name", name_got);
+        else begin
+            $display("[CHECK] FAIL  %-28s \"%s\" expected \"%s\"", "node name", name_got, EXP_NAME);
+            checks_failed++;
+        end
+        // Features
+        check("digital outputs (feature)", jvs_nodes.node_digital_outputs[0], smart_jvs.EXP_DOUT_COUNT);
+        // Digital output command (32) received by the board
+        check("OUTPUT1 frames received > 0", (smart_jvs.dout_rx_frames > 0), 1);
+        check("OUTPUT1 byte count", smart_jvs.dout_rx_count, (smart_jvs.EXP_DOUT_COUNT + 7) / 8);
+        check("OUTPUT1 data byte 1", smart_jvs.dout_rx_data[0], TEST_DOUT[7:0]);
+        check("OUTPUT1 data byte 2", smart_jvs.dout_rx_data[1], TEST_DOUT[15:8]);
+        // Analog output command (33) received by the board
+        // Namco boards only: MAINID + command 70 after the feature check
+        check("MAINID frames (Namco only)", (smart_jvs.mainid_rx_frames > 0), NAMCO);
+        check("Namco 70 frames (Namco only)", (smart_jvs.namco70_rx_frames > 0), NAMCO);
+        if (NAMCO) begin
+            check("MAINID string", smart_jvs.mainid_rx_ok, 1);
+            check("Namco 70 data", smart_jvs.namco70_rx_ok, 1);
+        end
+        check("screen position (feature)", has_screen_pos, 1);
+        check("SCRPOSINP frames received > 0", (smart_jvs.scrpos_rx_frames > 0), 1);
+        check("screen position X", screen_pos_x, smart_jvs.EXP_SCR_X);
+        check("screen position Y", screen_pos_y, smart_jvs.EXP_SCR_Y);
+        check("analog outputs (feature)", jvs_nodes.node_analog_output_channels[0], smart_jvs.EXP_AOUT_COUNT);
+        check("ANLOUT frames received > 0", (smart_jvs.aout_rx_frames > 0), 1);
+        check("ANLOUT channel count", smart_jvs.aout_rx_count, smart_jvs.EXP_AOUT_COUNT);
+        check("ANLOUT channel 0", smart_jvs.aout_rx_data[0], TEST_AOUT0);
+        check("ANLOUT channel 1", smart_jvs.aout_rx_data[1], TEST_AOUT1);
+        // Switches
+        check("P1 switches", p1_sw, exp_player_sw(smart_jvs.EXP_P1_SW, 1'b0));
+        check("P2 switches", p2_sw, exp_player_sw(smart_jvs.EXP_P2_SW, 1'b1));
+        // Coins
+        for (int c = 0; c < 2; c++)
+            check($sformatf("coin slot %0d", c + 1), coin_status[c*16 +: 16], smart_jvs.EXP_COIN[c]);
+        // Analog
+        for (int c = 0; c < 8; c++)
+            check($sformatf("analog CH%0d (node_analog)", c), node_analog[c*16 +: 16], smart_jvs.EXP_ANALOG[c]);
+        for (int c = 0; c < 8; c++)
+            check($sformatf("analog CH%0d (analog_ch%0d)", c, c + 1), ana_ch[c], smart_jvs.EXP_ANALOG[c]);
+
+    endtask
+
+    // Wait for a few complete polling cycles, check everything, then stop the simulation
+    localparam int POLL_CYCLES_BEFORE_CHECK = 3;
+    initial begin
+        fork
+            begin
+                wait (bus_state == JVS_READY);
+                $display("[CHECK] Bus READY at %0t, waiting %0d polling cycles", $time, POLL_CYCLES_BEFORE_CHECK);
+                repeat (POLL_CYCLES_BEFORE_CHECK) @(posedge jvs_data_ready);
+                repeat (10) @(posedge clk);
+            end
+            begin
+                #(64'd30_000_000_000); // 30 s simulated (timescale 1ns)
+                $display("[CHECK] FAIL  timeout: bus never reached READY (state %s)", bus_state.name());
+                checks_failed++;
+            end
+        join_any
+        disable fork;
+
+        run_checks("initial init");
+        write_log_dump("sim_jvs_dump.hex");
+
+        // ---- Recovery: the board stops answering while polling, then answers again ----
+        $display("[CHECK] Recovery test: board stops answering at %0t", $time);
+        dev_respond = 1'b0;
+        fork
+            begin
+                wait (bus_state != JVS_READY);
+                $display("[CHECK] Bus left READY (%s) at %0t", bus_state.name(), $time);
+                wait (bus_state == JVS_ADDRESSING);
+                $display("[CHECK] Re-initialization started at %0t", $time);
+            end
+            begin
+                #(64'd20_000_000_000);
+                $display("[CHECK] FAIL  recovery: no re-initialization (state %s)", bus_state.name());
+                checks_failed++;
+            end
+        join_any
+        disable fork;
+        dev_respond = 1'b1;
+        fork
+            begin
+                wait (bus_state == JVS_READY);
+                $display("[CHECK] Bus READY again at %0t", $time);
+                repeat (POLL_CYCLES_BEFORE_CHECK) @(posedge jvs_data_ready);
+                repeat (10) @(posedge clk);
+            end
+            begin
+                #(64'd40_000_000_000);
+                $display("[CHECK] FAIL  recovery: bus never READY again (state %s)", bus_state.name());
+                checks_failed++;
+            end
+        join_any
+        disable fork;
+        run_checks("after recovery");
+
+        $display("=======================================================");
+        if (checks_failed == 0) $display("*** ALL CHECKS PASSED ***");
+        else                    $display("*** %0d CHECK(S) FAILED ***", checks_failed);
+        $finish;
+    end
+
+    //=========================================================================
+    // Bus logger (same module as in the core): captures the simulated bus and is
+    // written to sim_jvs_dump.bin at the end, in the jvs_dump.bin format
+    //=========================================================================
+    wire [15:0] log_entries;
+    wire [31:0] log_rd_data;
+    jvs_bus_logger #(.CLK_FREQ(MASTER_CLK_FREQ), .WORDS(8192)) bus_logger (
+        .clk(clk), .enable(1'b1), .restart(1'b0), .hold(1'b0), .ring(1'b0), .sync_start(1'b0),
+        .tx_line(uart_tx), .rx_line(device_to_jvs), .dir(rx485_dir),
+        .setup_n(sense), .link_n(1'b0),
+        .entry_count(log_entries), .full(),
+        .rd_clk(clk), .rd_addr(13'd0), .rd_data(log_rd_data)
+    );
+    task automatic write_log_dump(input string fname);
+        int fd;
+        fd = $fopen(fname, "w");
+        for (int i = 0; i < 8 + 2 * log_entries; i++)
+            $fdisplay(fd, "%08h", bus_logger.mem[i]);   // one 32-bit word per line (jvs_dump.py --hex)
+        $fclose(fd);
+        $display("[CHECK] Bus log: %0d entries written to %s", log_entries, fname);
+    endtask
 
     // Instance Smart JVS Device avec réponses automatiques
     smart_jvs_device #(
-        .MASTER_CLK_FREQ(MASTER_CLK_FREQ)
+        .MASTER_CLK_FREQ(MASTER_CLK_FREQ),
+        .NAMCO(NAMCO)
     ) smart_jvs (
         .clk(clk),
         .rst(rst),
@@ -159,7 +359,7 @@ module test_03_device_identification;
         .new_frame_received(smart_jvs_new_frame),
         .frame_length(smart_jvs_frame_length),
         .assigned_address(8'h01),
-        .auto_respond(1'b1), // Active les réponses automatiques
+        .auto_respond(dev_respond), // Réponses automatiques (coupées pour simuler une perte de liaison)
         .uart_rx_active(smart_jvs_uart_active),
         .current_byte(smart_jvs_current_byte),
         .response_sent(smart_jvs_response_sent)
@@ -396,7 +596,7 @@ module test_03_device_identification;
                 base_addr = dev * NODE_NAME_SIZE;
 
                 for (i = 0; i < NODE_NAME_SIZE; i++) begin
-                    char_data = name_bram[base_addr + i];
+                    char_data = dut.node_name_ram[base_addr + i]; // real DUT name BRAM
                     if (char_data == 8'h00) break; // Fin de chaîne
                     if (char_data >= 32 && char_data <= 126) begin // Caractères imprimables
                         node_name_str = {node_name_str, string'(char_data)};
@@ -646,8 +846,10 @@ module test_03_device_identification;
 
     // Génération VCD
     initial begin
-        $dumpfile("test_03_device_identification.vcd");
-        $dumpvars(0, test_03_device_identification);
+        if ($test$plusargs("vcd")) begin   // vsim ... +vcd to enable (very large file)
+            $dumpfile("tb_smart_device.vcd");
+            $dumpvars(0, tb_smart_device);
+        end
     end
 
     // Fonctions utilitaires pour l'affichage des états JVS_COM

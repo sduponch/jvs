@@ -1,151 +1,90 @@
 name: JVS Submodule Quartus Compilation
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
 
 jobs:
-  # Simulation tests are temporarily disabled
-  # simulation-tests:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #   - name: Checkout repository
-  #     uses: actions/checkout@v4
-  #     with:
-  #       repository: RndMnkIII/JVS_Debugger
-  #       ref: jvs_submodule
-  #       path: JVS_Debugger
-  #       submodules: 'recursive'
-  #   - name: Update JVS submodule to PR branch
-  #     run: |
-  #       cd JVS_Debugger/src/fpga/analogizer/jvs
-  #       git fetch origin
-  #       # Use the branch from the PR context, fallback to main for direct pushes
-  #       if [ "${{ github.event_name }}" = "pull_request" ]; then
-  #         BRANCH_REF="${{ github.head_ref }}"
-  #         echo "🔄 PR detected - using branch: $BRANCH_REF"
-  #         git checkout origin/$BRANCH_REF || {
-  #           echo "⚠️ Branch $BRANCH_REF not found, falling back to main"
-  #           git checkout origin/main
-  #         }
-  #       else
-  #         BRANCH_REF="${{ github.ref_name }}"
-  #         echo "📤 Push detected - using branch: $BRANCH_REF"
-  #         git checkout origin/$BRANCH_REF
-  #       fi
-  #       cd ../../../..
-  #       echo "✅ JVS submodule updated to branch: $BRANCH_REF"
-  #   - name: Install Quartus dependencies (includes ModelSim)
-  #     run: |
-  #       sudo apt-get update
-  #       sudo apt-get install -y libc6-i386 lib32z1 lib32ncurses6 libbz2-1.0 libxext6 libxft2 libxi6 libxtst6
-  #   - name: Cache Quartus installation
-  #     uses: actions/cache@v4
-  #     id: quartus-cache
-  #     with:
-  #       path: |
-  #         ~/quartus
-  #         ~/downloadtmp
-  #       key: quartus-lite-24.1std-1077-${{ runner.os }}-cyclonev-modelsim
-  #       restore-keys: |
-  #         quartus-lite-24.1std-1077-${{ runner.os }}-
-  #   - name: Install Quartus Prime Lite (includes ModelSim)
-  #     if: steps.quartus-cache.outputs.cache-hit != 'true'
-  #     run: |
-  #       echo "⬇️ Cache miss - Installing Quartus Prime Lite..."
-  #       wget -q https://downloads.intel.com/akdlm/software/acdsinst/24.1std/1077/qinst/qinst-lite-linux-24.1std-1077.run
-  #       chmod +x qinst-lite-linux-24.1std-1077.run
-  #       ./qinst-lite-linux-24.1std-1077.run --accept --quiet --nox11 --target $HOME/quartus_temp -- --cli --download-dir ~/downloadtmp --install-dir ~/quartus --accept-eula --components quartus,cyclonev
-  #       echo "📦 Installing ModelSim separately..."
-  #       wget -q https://downloads.intel.com/akdlm/software/acdsinst/20.1std.1/720/ib_installers/ModelSimSetup-20.1.1.720-linux.run
-  #       chmod +x ModelSimSetup-20.1.1.720-linux.run
-  #       ./ModelSimSetup-20.1.1.720-linux.run --mode unattended --installdir ~/quartus/modelsim_ase --accept_eula 1
-  #   - name: Setup Quartus environment (with ModelSim)
-  #     run: |
-  #       if [ "${{ steps.quartus-cache.outputs.cache-hit }}" == "true" ]; then
-  #         echo "✅ Cache hit - Using cached Quartus installation"
-  #       fi
-  #       echo "QUARTUS_ROOTDIR=$HOME/quartus/quartus" >> $GITHUB_ENV
-  #       echo "PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$HOME/quartus/modelsim_ase/linuxaloem:$PATH" >> $GITHUB_ENV
-  #       echo "LD_LIBRARY_PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib:$HOME/quartus/modelsim_ase/linuxaloem" >> $GITHUB_ENV
-  #   - name: Run JVS Simulation Tests
-  #     run: |
-  #       cd JVS_Debugger/src/fpga/analogizer/jvs/simu
-  #       echo "✅ Testing ModelSim installation..."
-  #       vsim -version || echo "Version check failed but continuing..."
-  #       echo "🧪 Running Test 03: Full JVS identification..."
-  #       make test_03
-  #       echo "✅ JVS Test 03 completed successfully"
-  #   - name: Upload test results
-  #     uses: actions/upload-artifact@v4
-  #     if: always()
-  #     with:
-  #       name: jvs-simulation-results
-  #       path: |
-  #         JVS_Debugger/src/fpga/analogizer/jvs/simu/*.vcd
-  #         JVS_Debugger/src/fpga/analogizer/jvs/simu/*.log
-  #         JVS_Debugger/src/fpga/analogizer/jvs/simu/work/
-  #       retention-days: 7
+  # Simulation regression (open source Verilator, no license needed):
+  #   - tb_smart_device: init, polling (24 switches, coins, analog, screen position),
+  #     OUTPUT1 routing per node, ANLOUT, escaping and link recovery against the synthetic
+  #     I/O board model; smart_namco: same with the Namco NA-JV model and vendor table
+  #   - tb_capture_replay: replay of every real bus capture of simu/captures/ (.bin Pocket
+  #     dumps, .jvs oscilloscope captures): frames sent by the controller compared byte by
+  #     byte, decoded values checked per node
+  # Same run locally (from this directory):
+  #   make -C simu replays
+  #   docker run --rm -v "$PWD:/work" -w /work/simu --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  #     --entrypoint make verilator/verilator:v5.030 regression SIM=verilator
+  simulation-regression:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+
+    - name: Generate replay scripts from the captures
+      run: make -C simu replays
+
+    - name: Run simulation regression (Verilator)
+      run: |
+        docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work/simu --entrypoint make \
+          verilator/verilator:v5.030 regression SIM=verilator
+
+    - name: Upload simulation logs
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: jvs-simulation-logs
+        path: |
+          simu/*.log
+          simu/*.build
+        retention-days: 7
 
   quartus-build:
-    # needs: simulation-tests  # Dependency removed since simulation is disabled
+    needs: simulation-regression  # do not build when the simulation regression fails
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read       # required by actions/deploy-pages since v4
       pages: write
       id-token: write
 
+    # Quartus runs in a docker image with Quartus Lite preinstalled: the Altera installer
+    # download now requires a login (the downloads.intel.com link is gone). 21.1.1 is the
+    # most recent Lite image (the official alterafpga/quartus-std images are the licensed
+    # Standard edition)
+    env:
+      QUARTUS_IMAGE: raetro/quartus:21.1.1
+
     steps:
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libc6-i386 lib32z1 lib32ncurses6 libbz2-1.0 libxext6 libxft2 libxi6 libxtst6
-
-    - name: Cache Quartus installation
-      uses: actions/cache@v4
-      id: quartus-cache
-      with:
-        path: /home/runner/quartus/quartus/
-        key: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
-        restore-keys: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
-
-    - name: Install Quartus Prime Lite
-      if: steps.quartus-cache.outputs.cache-hit != 'true'
-      run: |
-        echo "⬇️ Cache miss - Installing Quartus Prime Lite..."
-
-        # Download and install Quartus Lite
-        wget -q https://downloads.intel.com/akdlm/software/acdsinst/24.1std/1077/qinst/qinst-lite-linux-24.1std-1077.run
-        chmod +x qinst-lite-linux-24.1std-1077.run
-
-        # Extract and install automatically
-        ./qinst-lite-linux-24.1std-1077.run -- --cli --accept-eula --components quartus,cyclonev,questa_fse --download-dir $HOME/quartustmp --install-dir $HOME/quartus
-
-        # Installation should be done automatically by the extractor above
-        echo "Installation completed by extractor"
-
-    - name: Check cache usage
-      run: |
-        if [ "${{ steps.quartus-cache.outputs.cache-hit }}" == "true" ]; then
-          echo "✅ Cache hit - Using cached Quartus installation"
-        fi
-
-    - name: Setup ENV for Quartus
-      run: |
-        echo "PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$PATH" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-        echo "QUARTUS_ROOTDIR=$HOME/quartus/quartus" >> $GITHUB_ENV
+    - name: Pull the Quartus image
+      run: docker pull "$QUARTUS_IMAGE"
 
     - name: Check quartus_sh
-      run: quartus_sh --version
+      run: docker run --rm --entrypoint quartus_sh "$QUARTUS_IMAGE" --version
+
+    # JVS_Debugger branch built with this jvs branch: the branch of the same name when it
+    # exists (core using the jvs API of this branch), otherwise main
+    - name: Select the JVS_Debugger branch
+      id: debugger
+      run: |
+        JVS_BRANCH="${{ github.head_ref || github.ref_name }}"
+        if git ls-remote --exit-code --heads https://github.com/RndMnkIII/JVS_Debugger.git "$JVS_BRANCH" > /dev/null; then
+          REF="$JVS_BRANCH"
+        else
+          REF=main
+        fi
+        echo "ref=$REF" >> "$GITHUB_OUTPUT"
+        echo "✅ JVS_Debugger branch: $REF (jvs branch: $JVS_BRANCH)"
 
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         repository: RndMnkIII/JVS_Debugger
-        ref: main
+        ref: ${{ steps.debugger.outputs.ref }}
         path: JVS_Debugger
         submodules: 'recursive'
 
@@ -199,10 +138,12 @@ jobs:
 
     - name: Compile JVS project
       run: |
-        # Run compilation
+        # Run compilation in the Quartus image; --user / HOME=/tmp: output files owned by
+        # the runner user, so that the next steps can write next to them
         echo "🚀 Starting compilation..."
-        cd JVS_Debugger/src/fpga
-        quartus_sh --flow compile JVS_Debugger
+        docker run --rm -v "$GITHUB_WORKSPACE:/build" -w /build/JVS_Debugger/src/fpga \
+          --user "$(id -u):$(id -g)" -e HOME=/tmp \
+          --entrypoint quartus_sh "$QUARTUS_IMAGE" --flow compile JVS_Debugger
 
     - name: Create RBF_R for Analog Pocket
       run: |
@@ -337,21 +278,21 @@ jobs:
 
     - name: Setup Pages
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      uses: actions/configure-pages@v4
+      uses: actions/configure-pages@v6
 
     - name: Upload to Pages
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      uses: actions/upload-pages-artifact@v3
+      uses: actions/upload-pages-artifact@v5
       with:
         path: JVS_Debugger/package
 
     - name: Deploy to GitHub Pages
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      uses: actions/deploy-pages@v4
+      uses: actions/deploy-pages@v5
       id: deployment
 
     - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       if: always()
       with:
         name: jvs-debugger-outputs
