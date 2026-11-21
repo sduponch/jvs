@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Generate replay scripts from the captures
       run: make -C simu replays
@@ -35,7 +35,7 @@ jobs:
 
     - name: Upload simulation logs
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: jvs-simulation-logs
         path: |
@@ -48,13 +48,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read       # required by actions/deploy-pages since v4
       pages: write
       id-token: write
 
     # Quartus runs in a docker image with Quartus Lite preinstalled: the Altera installer
-    # download now requires a login (the downloads.intel.com link is gone)
+    # download now requires a login (the downloads.intel.com link is gone). 21.1.1 is the
+    # most recent Lite image (the official alterafpga/quartus-std images are the licensed
+    # Standard edition)
     env:
-      QUARTUS_IMAGE: raetro/quartus:21.1
+      QUARTUS_IMAGE: raetro/quartus:21.1.1
 
     steps:
     - name: Pull the Quartus image
@@ -63,11 +66,25 @@ jobs:
     - name: Check quartus_sh
       run: docker run --rm --entrypoint quartus_sh "$QUARTUS_IMAGE" --version
 
+    # JVS_Debugger branch built with this jvs branch: the branch of the same name when it
+    # exists (core using the jvs API of this branch), otherwise main
+    - name: Select the JVS_Debugger branch
+      id: debugger
+      run: |
+        JVS_BRANCH="${{ github.head_ref || github.ref_name }}"
+        if git ls-remote --exit-code --heads https://github.com/RndMnkIII/JVS_Debugger.git "$JVS_BRANCH" > /dev/null; then
+          REF="$JVS_BRANCH"
+        else
+          REF=main
+        fi
+        echo "ref=$REF" >> "$GITHUB_OUTPUT"
+        echo "✅ JVS_Debugger branch: $REF (jvs branch: $JVS_BRANCH)"
+
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         repository: RndMnkIII/JVS_Debugger
-        ref: main
+        ref: ${{ steps.debugger.outputs.ref }}
         path: JVS_Debugger
         submodules: 'recursive'
 
@@ -261,21 +278,21 @@ jobs:
 
     - name: Setup Pages
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      uses: actions/configure-pages@v4
+      uses: actions/configure-pages@v6
 
     - name: Upload to Pages
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      uses: actions/upload-pages-artifact@v3
+      uses: actions/upload-pages-artifact@v5
       with:
         path: JVS_Debugger/package
 
     - name: Deploy to GitHub Pages
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      uses: actions/deploy-pages@v4
+      uses: actions/deploy-pages@v5
       id: deployment
 
     - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       if: always()
       with:
         name: jvs-debugger-outputs
