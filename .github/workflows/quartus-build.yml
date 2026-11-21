@@ -9,10 +9,16 @@ on:
 
 jobs:
   # Simulation regression (open source Verilator, no license needed):
-  #   - tb_smart_device: init, polling, digital outputs and link recovery against the
-  #     synthetic I/O board model
-  #   - tb_capture_replay: replay of every real bus capture of simu/captures/*.bin
-  #     (frames sent by the controller compared byte by byte, decoded values checked)
+  #   - tb_smart_device: init, polling (24 switches, coins, analog, screen position),
+  #     OUTPUT1 routing per node, ANLOUT, escaping and link recovery against the synthetic
+  #     I/O board model; smart_namco: same with the Namco NA-JV model and vendor table
+  #   - tb_capture_replay: replay of every real bus capture of simu/captures/ (.bin Pocket
+  #     dumps, .jvs oscilloscope captures): frames sent by the controller compared byte by
+  #     byte, decoded values checked per node
+  # Same run locally (from this directory):
+  #   make -C simu replays
+  #   docker run --rm -v "$PWD:/work" -w /work/simu --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  #     --entrypoint make verilator/verilator:v5.030 regression SIM=verilator
   simulation-regression:
     runs-on: ubuntu-latest
     steps:
