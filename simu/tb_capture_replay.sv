@@ -97,7 +97,7 @@ module tb_capture_replay;
     endfunction
 
     initial begin
-        string name_hex;
+        string name_hex, exp_name;
         logic [7:0] ch;
         repeat (100) @(posedge clk);
         rst = 0;
@@ -136,7 +136,8 @@ module tb_capture_replay;
                     if (ch == 8'h00) break;
                     name_hex = {name_hex, $sformatf("%02X", ch)};
                 end
-                if (name_hex.toupper() == replay.get_expect({pfx, "NAME"}).toupper())
+                exp_name = replay.get_expect({pfx, "NAME"});   // string method on a variable only (Verilator)
+                if (name_hex.toupper() == exp_name.toupper())
                     $display("[CHECK] PASS  %-28s", {pfx, "name"});
                 else begin
                     $display("[CHECK] FAIL  %s\n           got      %s\n           expected %s", {pfx, "name"},

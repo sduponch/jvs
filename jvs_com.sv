@@ -611,7 +611,7 @@ module jvs_com
             rx_ready <= 1'b0;
             rx_data_idx <= 0;
             rx_checksum_calc <= 0;
-            rx_escape_mode <= 1'b0;
+            rx_escape_mode = 1'b0;          // blocking, as in handle_escape_rx (ref argument)
             frames_rx_count <= 0;
             checksum_errors_count <= 0;
             rx_state_debug <= RX_IDLE;
@@ -649,7 +649,7 @@ module jvs_com
                         if (uart_rx_data == JVS_SYNC) begin
                             rx_checksum_calc <= 0;
                             rx_data_idx <= 0;
-                            rx_escape_mode <= 1'b0;
+                            rx_escape_mode = 1'b0;    // blocking, as in handle_escape_rx
                             rx_length_internal <= 0;  // CRITICAL: Reset length for new frame
                             rx_state <= RX_NODE;
                         end else begin

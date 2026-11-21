@@ -298,6 +298,7 @@ module smart_jvs_device #(
     } jvs_rx_state_t;
 
     jvs_rx_state_t rx_state = RX_IDLE;
+    jvs_rx_state_t rx_state_eff;       // rx_state, or RX_IDLE on a raw SYNC byte (decoded below)
 
     // État de transmission de réponse
     typedef enum logic [2:0] {
@@ -317,7 +318,10 @@ module smart_jvs_device #(
 
     integer response_length = 0;
     integer response_index = 0;
-    logic need_response = 0;
+    logic need_response = 0;      // set by analyze_and_respond() (receive block only)
+    // Response request handshake between the receive and transmit blocks (one writer each,
+    // as required by Verilator): a response is pending while resp_req != resp_ack
+    logic resp_req = 0, resp_ack = 0;
 
     // Compteur pour délai RS485 setup time (1ms)
     localparam logic [31:0] SETUP_TIME_CYCLES = MASTER_CLK_FREQ / 1_100_000; // 100us
@@ -816,8 +820,9 @@ module smart_jvs_device #(
             expected_frame_length <= 0;
             current_frame_length <= 0;
             new_frame_received <= 0;
-            device_address <= assigned_address;
-            need_response <= 0;
+            device_address = assigned_address;   // blocking, as in analyze_and_respond()
+            need_response = 0;
+            resp_req <= 0;
 
             // Clear buffers
             for (integer i = 0; i < 64; i++) begin
@@ -837,10 +842,11 @@ module smart_jvs_device #(
                 rxb = (uart_rx_byte == JVS_SYNC_BYTE) ? uart_rx_byte :
                       rx_mark ? uart_rx_byte + 8'h01 : uart_rx_byte;
                 rx_mark <= 1'b0;
-                if (uart_rx_byte == JVS_SYNC_BYTE) rx_state = RX_IDLE;  // SYNC: (re)start a packet
+                // SYNC: (re)start a packet whatever the current state
+                rx_state_eff = (uart_rx_byte == JVS_SYNC_BYTE) ? RX_IDLE : rx_state;
                 $display("[SMART_JVS] Byte reçu: 0x%02X (décodé 0x%02X) - État: %s",
-                        uart_rx_byte, rxb, rx_state.name());
-                case (rx_state)
+                        uart_rx_byte, rxb, rx_state_eff.name());
+                case (rx_state_eff)
                     //-----------------------------------------------------
                     // RX_IDLE - Wait for frame start (sync byte)
                     //-----------------------------------------------------
@@ -964,7 +970,9 @@ module smart_jvs_device #(
 
                 // Analyser la commande et préparer la réponse
                 if (auto_respond) begin
+                    need_response = 0;
                     analyze_and_respond();
+                    if (need_response) resp_req <= ~resp_req;   // request the transmit block
                 end
 
                 // Signal frame completed
@@ -988,13 +996,15 @@ module smart_jvs_device #(
             response_index <= 0;
             response_sent <= 0;
             setup_time_counter <= 0;
+            resp_ack <= 0;
         end else begin
             response_sent <= 0; // Pulse
 
             case (tx_state)
                 TX_IDLE: begin
                     uart_tx_dv <= 0;
-                    if (need_response) begin
+                    if (resp_req != resp_ack) begin
+                        resp_ack <= resp_req;
                         response_index <= 0;
                         setup_time_counter <= 0;
                         tx_state <= TX_WAIT_SETUP;
@@ -1042,7 +1052,6 @@ module smart_jvs_device #(
                 end
 
                 TX_COMPLETE: begin
-                    need_response <= 0;
                     response_sent <= 1;
                     tx_state <= TX_IDLE;
                     $display("[SMART_JVS] *** RÉPONSE TRANSMISE (%d bytes) ***", response_length);

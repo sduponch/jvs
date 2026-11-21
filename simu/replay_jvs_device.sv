@@ -34,21 +34,23 @@ module replay_jvs_device #(
     //------------------------------------------------------------------
     // Script storage
     //------------------------------------------------------------------
-    typedef struct {
-        byte  kind;          // "L", "T", "R"
-        int   delay_us;
-        int   a, b;          // L levels
-        byte  data[$];
-    } step_t;
-    step_t       steps[$];
+    // Flat storage (simple queues only: Verilator does not handle queues of queues or
+    // structs holding a queue): step k = kind / a / b / delay, its bytes are
+    // step_bytes[step_start[k] +: step_len[k]]
+    byte         step_kind[$];      // "L", "T", "R"
+    int          step_a[$], step_b[$], step_delay[$];
+    int          step_start[$], step_len[$];
+    byte         step_bytes[$];
     string       expect_map[string];
 
     function automatic string get_expect(input string key);
         return expect_map.exists(key) ? expect_map[key] : "";
     endfunction
 
-    // split a line into space separated tokens
-    function automatic void tokenize(input string line, ref string toks[$]);
+    // split a line into space separated tokens, result in toks (no ref argument: not
+    // handled by the Verilator CI for a queue of strings)
+    string toks[$];
+    function automatic void tokenize(input string line);
         string cur = "";
         toks.delete();
         for (int i = 0; i < line.len(); i++) begin
@@ -63,34 +65,47 @@ module replay_jvs_device #(
     initial begin
         int    fd;
         string line;
-        string toks[$];
+        string t0;                      // first token (Verilator: no char index on an array element)
         fd = $fopen(REPLAY_FILE, "r");
         if (fd == 0) $fatal(1, "[REPLAY] cannot open %s", REPLAY_FILE);
         while (!$feof(fd)) begin
-            automatic step_t st;
+            string tk, v;
+            int    first;
             if ($fgets(line, fd) == 0) break;
-            tokenize(line, toks);
-            if (toks.size() == 0 || toks[0][0] == "#") continue;
-            st.kind = toks[0][0];
-            st.data = {};
-            case (toks[0])
-                "L": begin st.a = toks[1].atoi(); st.b = toks[2].atoi(); steps.push_back(st); end
-                "T": begin for (int i = 1; i < toks.size(); i++) st.data.push_back(byte'(toks[i].atohex())); steps.push_back(st); end
-                "R": begin
-                         st.delay_us = toks[1].atoi();
-                         for (int i = 2; i < toks.size(); i++) st.data.push_back(byte'(toks[i].atohex()));
-                         steps.push_back(st);
-                     end
-                "E": begin
-                         automatic string v = "";
-                         for (int i = 2; i < toks.size(); i++) v = {v, (i > 2) ? " " : "", toks[i]};
-                         expect_map[toks[1]] = v;
-                     end
-                default: ;
-            endcase
+            tokenize(line);
+            if (toks.size() == 0) continue;
+            t0 = toks[0];
+            if (t0[0] == "#") continue;
+            if (t0 == "L" || t0 == "T" || t0 == "R") begin
+                step_kind.push_back(t0[0]);
+                step_a.push_back(0); step_b.push_back(0); step_delay.push_back(0);
+                step_start.push_back(step_bytes.size());
+                first = (t0 == "T") ? 1 : 2;        // data bytes start after "T" / "R delay"
+                if (t0 == "L") begin
+                    tk = toks[1]; step_a[step_a.size() - 1] = tk.atoi();
+                    tk = toks[2]; step_b[step_b.size() - 1] = tk.atoi();
+                    first = toks.size();            // no data bytes
+                end
+                if (t0 == "R") begin
+                    tk = toks[1]; step_delay[step_delay.size() - 1] = tk.atoi();
+                end
+                for (int i = first; i < toks.size(); i++) begin
+                    tk = toks[i];
+                    step_bytes.push_back(byte'(tk.atohex()));
+                end
+                step_len.push_back(step_bytes.size() - step_start[step_start.size() - 1]);
+            end else if (t0 == "E") begin
+                v = "";
+                for (int i = 2; i < toks.size(); i++) begin
+                    tk = toks[i];
+                    v = {v, (i > 2) ? " " : "", tk};
+                end
+                tk = toks[1];
+                expect_map[tk] = v;
+            end
         end
         $fclose(fd);
-        $display("[REPLAY] %s: %0d steps, %0d expected values", REPLAY_FILE, steps.size(), expect_map.num());
+        $display("[REPLAY] %s: %0d steps, %0d expected values", REPLAY_FILE, step_kind.size(), expect_map.num());
     end
 
     //------------------------------------------------------------------
@@ -101,7 +116,8 @@ module replay_jvs_device #(
     uart_rx #(.CLKS_PER_BIT(CLKS_PER_BIT)) u_rx (.i_Clock(clk), .i_Rx_Serial(uart_rx_from_master), .o_Rx_DV(m_dv), .o_Rx_Byte(m_byte));
 
     byte  m_frame[$];          // raw bytes of the frame being received
-    byte  m_done_frames[$][$]; // complete frames, oldest first
+    byte  m_done_bytes[$];     // complete frames, oldest first, one after the other
+    int   m_done_len[$];       // length of each complete frame
     int   m_unesc_cnt;
     logic m_esc;
     byte  m_len;
@@ -118,7 +134,8 @@ module replay_jvs_device #(
                     m_unesc_cnt++;
                     m_esc = 0;
                     if (m_unesc_cnt >= 2 && m_unesc_cnt == 2 + m_len) begin
-                        m_done_frames.push_back(m_frame);
+                        foreach (m_frame[i]) m_done_bytes.push_back(m_frame[i]);
+                        m_done_len.push_back(m_frame.size());
                         m_frame = {};
                     end
                 end
@@ -145,6 +162,11 @@ module replay_jvs_device #(
         foreach (q[i]) s = {s, $sformatf("%02X ", q[i])};
         return s;
     endfunction
+    function automatic string step_hexs(input int k);
+        string s = "";
+        for (int i = 0; i < step_len[k]; i++) s = {s, $sformatf("%02X ", step_bytes[step_start[k] + i])};
+        return s;
+    endfunction
 
     initial begin
         uart_tx_to_master = 1'b1;
@@ -153,29 +175,37 @@ module replay_jvs_device #(
         tx_frames_checked = 0; tx_mismatches = 0; rx_frames_sent = 0;
         @(negedge rst);
         #1;
-        foreach (steps[k]) begin
-            case (steps[k].kind)
+        for (int k = 0; k < step_kind.size(); k++) begin
+            case (step_kind[k])
                 "L": begin
-                         sense_in7 = steps[k].a[0];
-                         link_io3  = steps[k].b[0];
+                         sense_in7 = step_a[k][0];
+                         link_io3  = step_b[k][0];
                          $display("[REPLAY] %0t lines IN7=%0d IO3=%0d", $time, sense_in7, link_io3);
                      end
                 "T": begin
-                         automatic byte got[$];
-                         wait (m_done_frames.size() > 0);
-                         got = m_done_frames.pop_front();
+                         byte got[$];
+                         int  n;
+                         logic same;
+                         while (m_done_len.size() == 0) @(posedge clk);
+                         n = m_done_len.pop_front();
+                         got = {};
+                         for (int i = 0; i < n; i++) got.push_back(m_done_bytes.pop_front());
                          tx_frames_checked++;
-                         if (got != steps[k].data) begin
+                         same = (n == step_len[k]);
+                         for (int i = 0; i < n && same; i++)
+                             if (got[i] != step_bytes[step_start[k] + i]) same = 1'b0;
+                         if (!same) begin
                              tx_mismatches++;
                              $display("[REPLAY] %0t TX MISMATCH frame %0d\n           got      %s\n           expected %s",
-                                      $time, tx_frames_checked, hexs(got), hexs(steps[k].data));
+                                      $time, tx_frames_checked, hexs(got), step_hexs(k));
                          end
                      end
                 "R": begin
-                         repeat (steps[k].delay_us * (CLK_FREQ / 1_000_000)) @(posedge clk);
-                         foreach (steps[k].data[i]) send_byte(steps[k].data[i]);
+                         repeat (step_delay[k] * (CLK_FREQ / 1_000_000)) @(posedge clk);
+                         for (int i = 0; i < step_len[k]; i++) send_byte(step_bytes[step_start[k] + i]);
                          rx_frames_sent++;
                      end
+                default: ;
             endcase
         end
         $display("[REPLAY] %0t script done: %0d TX frames checked (%0d mismatches), %0d answers sent",
