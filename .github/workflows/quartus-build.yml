@@ -51,49 +51,17 @@ jobs:
       pages: write
       id-token: write
 
+    # Quartus runs in a docker image with Quartus Lite preinstalled: the Altera installer
+    # download now requires a login (the downloads.intel.com link is gone)
+    env:
+      QUARTUS_IMAGE: raetro/quartus:21.1
+
     steps:
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libc6-i386 lib32z1 lib32ncurses6 libbz2-1.0 libxext6 libxft2 libxi6 libxtst6
-
-    - name: Cache Quartus installation
-      uses: actions/cache@v4
-      id: quartus-cache
-      with:
-        path: /home/runner/quartus/quartus/
-        key: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
-        restore-keys: quartus-lite-24.1std-1077-${{ runner.os }}-quartus.cyclonev.questa_fse
-
-    - name: Install Quartus Prime Lite
-      if: steps.quartus-cache.outputs.cache-hit != 'true'
-      run: |
-        echo "⬇️ Cache miss - Installing Quartus Prime Lite..."
-
-        # Download and install Quartus Lite
-        wget -q https://downloads.intel.com/akdlm/software/acdsinst/24.1std/1077/qinst/qinst-lite-linux-24.1std-1077.run
-        chmod +x qinst-lite-linux-24.1std-1077.run
-
-        # Extract and install automatically
-        ./qinst-lite-linux-24.1std-1077.run -- --cli --accept-eula --components quartus,cyclonev,questa_fse --download-dir $HOME/quartustmp --install-dir $HOME/quartus
-
-        # Installation should be done automatically by the extractor above
-        echo "Installation completed by extractor"
-
-    - name: Check cache usage
-      run: |
-        if [ "${{ steps.quartus-cache.outputs.cache-hit }}" == "true" ]; then
-          echo "✅ Cache hit - Using cached Quartus installation"
-        fi
-
-    - name: Setup ENV for Quartus
-      run: |
-        echo "PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/bin:$PATH" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=$HOME/quartus/quartus/linux64:$HOME/quartus/quartus/linux64/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-        echo "QUARTUS_ROOTDIR=$HOME/quartus/quartus" >> $GITHUB_ENV
+    - name: Pull the Quartus image
+      run: docker pull "$QUARTUS_IMAGE"
 
     - name: Check quartus_sh
-      run: quartus_sh --version
+      run: docker run --rm --entrypoint quartus_sh "$QUARTUS_IMAGE" --version
 
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -153,10 +121,12 @@ jobs:
 
     - name: Compile JVS project
       run: |
-        # Run compilation
+        # Run compilation in the Quartus image; --user / HOME=/tmp: output files owned by
+        # the runner user, so that the next steps can write next to them
         echo "🚀 Starting compilation..."
-        cd JVS_Debugger/src/fpga
-        quartus_sh --flow compile JVS_Debugger
+        docker run --rm -v "$GITHUB_WORKSPACE:/build" -w /build/JVS_Debugger/src/fpga \
+          --user "$(id -u):$(id -g)" -e HOME=/tmp \
+          --entrypoint quartus_sh "$QUARTUS_IMAGE" --flow compile JVS_Debugger
 
     - name: Create RBF_R for Analog Pocket
       run: |
