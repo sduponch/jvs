@@ -163,7 +163,10 @@ OUTPUT1 base and recoil masks (0xF0..0xFF).
   reloadable slots, the firmware is stricter). NES had exactly 16 entries: adding the reloadable "JVS Profile"
   slot dropped the last two (Use Zapper, D-Pad Aim Speed), and a 17th entry broke more. Count entries + reloadable
   slots first, leave margin, drop the disabled section titles (`"type": "action", "enabled": false`) when room is
-  needed (NES: 16 → 13), and fold new choices into an existing `list` (one entry whatever its options, up to 16). NES: "Use Zapper" (0x304) = 0 off, 1 emulated, 2 SNAC Zapper, 3 emulated + recoil,
+  needed (NES: 16 → 13), and fold new choices into an existing `list` (one entry whatever its options, up to 16).
+  **Changing an entry's type (check → list) needs a new `id`:** the Pocket keeps `{id, type, val}` in
+  `Settings/<core>/Interact/_core/interact_persist.json`, and an old `check` value under a `list` id gives
+  "load error in interact" (Genesis: "Lightgun" check 70 + "Show Crosshair" 71 merged into list 73). NES: "Use Zapper" (0x304) = 0 off, 1 emulated, 2 SNAC Zapper, 3 emulated + recoil,
   4 emulated + recoil auto; `core_top.sv` maps 1/3/4 to the emulated Zapper, the Analogizer top 3/4 to the
   recoil modes:
   - **Off**: never (the profile's base value only).
