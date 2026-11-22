@@ -308,7 +308,60 @@ module jvs_ctrl #(
     localparam JVS_CHECKSUM_SIZE = 8'd1;     // Checksum is coded on one byte
 
     // Buffer size configuration for resource optimization
-    localparam RX_BUFFER_SIZE = 128;         // Size of RX buffers (I/O Identify max 106 bytes)
+    localparam RX_BUFFER_SIZE = 128;
+
+    // Optional JVS functions (all on by default). A core that has no use for a function can leave it out with a
+    // Verilog macro (Quartus: VERILOG_MACRO "JVS_NO_xxx"): its feature flag stays 0, its poll command is never sent
+    // and its answer parser is gone. JVS_LITE leaves out all of them but the coins (rotary, keycode, screen position,
+    // misc digital inputs, analog outputs); JVS_NO_COIN leaves out the coins too. JVS_MAX_NODES (jvs_node_info_pkg)
+    // sets how many nodes are addressed (2 by default).
+`ifdef JVS_LITE
+  `ifndef JVS_NO_ROTARY
+    `define JVS_NO_ROTARY
+  `endif
+  `ifndef JVS_NO_KEYCODE
+    `define JVS_NO_KEYCODE
+  `endif
+  `ifndef JVS_NO_SCREEN_POS
+    `define JVS_NO_SCREEN_POS
+  `endif
+  `ifndef JVS_NO_MISC
+    `define JVS_NO_MISC
+  `endif
+  `ifndef JVS_NO_ANALOG_OUT
+    `define JVS_NO_ANALOG_OUT
+  `endif
+`endif
+`ifdef JVS_NO_COIN
+    localparam bit JVS_HAS_COIN = 1'b0;
+`else
+    localparam bit JVS_HAS_COIN = 1'b1;
+`endif
+`ifdef JVS_NO_ROTARY
+    localparam bit JVS_HAS_ROTARY = 1'b0;
+`else
+    localparam bit JVS_HAS_ROTARY = 1'b1;
+`endif
+`ifdef JVS_NO_KEYCODE
+    localparam bit JVS_HAS_KEYCODE = 1'b0;
+`else
+    localparam bit JVS_HAS_KEYCODE = 1'b1;
+`endif
+`ifdef JVS_NO_SCREEN_POS
+    localparam bit JVS_HAS_SCREEN_POS = 1'b0;
+`else
+    localparam bit JVS_HAS_SCREEN_POS = 1'b1;
+`endif
+`ifdef JVS_NO_MISC
+    localparam bit JVS_HAS_MISC = 1'b0;
+`else
+    localparam bit JVS_HAS_MISC = 1'b1;
+`endif
+`ifdef JVS_NO_ANALOG_OUT
+    localparam bit JVS_HAS_ANALOG_OUT = 1'b0;
+`else
+    localparam bit JVS_HAS_ANALOG_OUT = 1'b1;
+`endif         // Size of RX buffers (I/O Identify max 106 bytes)
     localparam TX_BUFFER_SIZE = 24;          // Size of TX buffer (max frame ~21 bytes)
     
     // JVS node management constants
@@ -1378,22 +1431,22 @@ module jvs_ctrl #(
                                         jvs_nodes_r.player_count <= jvs_nodes_r.player_count + com_rx_byte[3:0];
                                     end
                                     FUNC_INPUT_COIN: begin
-                                        jvs_nodes_r.node_coin_slots[current_device_addr - 1] <= com_rx_byte[3:0];
+                                        jvs_nodes_r.node_coin_slots[current_device_addr - 1] <= JVS_HAS_COIN ? com_rx_byte[3:0] : 4'h0;
                                     end
                                     FUNC_INPUT_ANALOG: begin
                                         jvs_nodes_r.node_analog_channels[current_device_addr - 1] <= com_rx_byte[3:0];
                                     end
                                     FUNC_INPUT_ROTARY: begin
-                                        jvs_nodes_r.node_rotary_channels[current_device_addr - 1] <= com_rx_byte[3:0];
+                                        jvs_nodes_r.node_rotary_channels[current_device_addr - 1] <= JVS_HAS_ROTARY ? com_rx_byte[3:0] : 4'h0;
                                     end
                                     FUNC_INPUT_KEYCODE: begin
-                                        jvs_nodes_r.node_has_keycode_input[current_device_addr - 1] <= 1'b1;
+                                        jvs_nodes_r.node_has_keycode_input[current_device_addr - 1] <= JVS_HAS_KEYCODE;
                                     end
                                     FUNC_INPUT_SCREEN_POS: begin
                                         jvs_nodes_r.node_screen_pos_x_bits[current_device_addr - 1] <= com_rx_byte;
                                     end
                                     FUNC_INPUT_MISC_DIGITAL: begin
-                                        jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1][15:8] <= com_rx_byte;
+                                        jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1][15:8] <= JVS_HAS_MISC ? com_rx_byte : 8'h00;
                                     end
                                     FUNC_OUTPUT_CARD: begin
                                         jvs_nodes_r.node_card_system_slots[current_device_addr - 1] <= com_rx_byte;
@@ -1405,7 +1458,7 @@ module jvs_ctrl #(
                                         jvs_nodes_r.node_digital_outputs[current_device_addr - 1] <= com_rx_byte;
                                     end
                                     FUNC_OUTPUT_ANALOG: begin
-                                        jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] <= com_rx_byte[3:0];
+                                        jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] <= JVS_HAS_ANALOG_OUT ? com_rx_byte[3:0] : 4'h0;
                                     end
                                     FUNC_OUTPUT_CHAR: begin
                                         jvs_nodes_r.node_has_char_display[current_device_addr - 1] <= 1'b1;
@@ -1431,11 +1484,11 @@ module jvs_ctrl #(
                                     end
                                     FUNC_INPUT_SCREEN_POS: begin
                                         jvs_nodes_r.node_screen_pos_y_bits[current_device_addr - 1] <= com_rx_byte;
-                                        jvs_nodes_r.node_has_screen_pos[current_device_addr - 1] <= 1'b1;
-                                        has_screen_pos <= 1'b1;
+                                        jvs_nodes_r.node_has_screen_pos[current_device_addr - 1] <= JVS_HAS_SCREEN_POS;
+                                        has_screen_pos <= JVS_HAS_SCREEN_POS;
                                     end
                                     FUNC_INPUT_MISC_DIGITAL: begin
-                                        jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1][7:0] <= com_rx_byte;
+                                        jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1][7:0] <= JVS_HAS_MISC ? com_rx_byte : 8'h00;
                                     end
                                     FUNC_OUTPUT_CHAR: begin
                                         jvs_nodes_r.node_char_display_height[current_device_addr - 1] <= com_rx_byte;
@@ -1535,7 +1588,7 @@ module jvs_ctrl #(
                     end
                 end
                 STATE_SEND_INPUTS_COIN: begin // (CMD_COININP) @TODO: (CMD_COINDEC),(COININC)
-                    if (jvs_nodes_r.node_coin_slots[current_device_addr - 1] > 0) begin
+                    if (JVS_HAS_COIN && jvs_nodes_r.node_coin_slots[current_device_addr - 1] > 0) begin
                         // Send COININP command using sequential byte transmission
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1599,7 +1652,7 @@ module jvs_ctrl #(
                     end
                 end
                 STATE_SEND_INPUTS_ROTARY: begin
-                    if (jvs_nodes_r.node_rotary_channels[current_device_addr - 1] > 0) begin
+                    if (JVS_HAS_ROTARY && jvs_nodes_r.node_rotary_channels[current_device_addr - 1] > 0) begin
                         // Send ROTINP command using sequential byte transmission
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1633,7 +1686,7 @@ module jvs_ctrl #(
                     end
                 end
                 STATE_SEND_INPUTS_KEYCODE: begin
-                    if (jvs_nodes_r.node_has_keycode_input[current_device_addr - 1]) begin
+                    if (JVS_HAS_KEYCODE && jvs_nodes_r.node_has_keycode_input[current_device_addr - 1]) begin
                         // Send KEYINP command using sequential byte transmission (no parameters)
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1662,7 +1715,7 @@ module jvs_ctrl #(
                     end
                 end
                 STATE_SEND_INPUTS_SCREEN: begin
-                    if (jvs_nodes_r.node_has_screen_pos[current_device_addr - 1]) begin
+                    if (JVS_HAS_SCREEN_POS && jvs_nodes_r.node_has_screen_pos[current_device_addr - 1]) begin
                         // Send SCRPOSINP command using sequential byte transmission
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1696,7 +1749,7 @@ module jvs_ctrl #(
                     end
                 end
                 STATE_SEND_INPUTS_MISC: begin
-                    if (jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1] > 0) begin
+                    if (JVS_HAS_MISC && jvs_nodes_r.node_misc_digital_inputs[current_device_addr - 1] > 0) begin
                         // Send MISCSWINP command using sequential byte transmission
                         if (com_tx_ready) begin
                             // Initialize command parameters on first entry
@@ -1792,7 +1845,7 @@ module jvs_ctrl #(
                 //-------------------------------------------------------------
                 STATE_SEND_OUTPUT_ANALOG: begin // (CMD_ANLOUT)
                     // Check if device has analog outputs
-                    if (jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] > 0 && output_node_match) begin
+                    if (JVS_HAS_ANALOG_OUT && jvs_nodes_r.node_analog_output_channels[current_device_addr - 1] > 0 && output_node_match) begin
                         if(com_tx_ready) begin
                                // Initialize command parameters on first entry
                                 if (cmd_pos == 0) begin
@@ -2030,29 +2083,33 @@ module jvs_ctrl #(
                                 endcase
                             end
                             CMD_COININP: begin
-                                case(cmd_pos)
-                                    3'd0: begin
-                                        // Check REPORT byte
-                                        if (com_rx_byte == REPORT_NORMAL) begin
-                                            return_state <= RX_PARSE_INPUT_CMD;
-                                            main_state <= STATE_RX_NEXT;
-                                            com_rx_next <= 1'b1;
-                                        end else begin
-                                            com_src_cmd_next <= 1'b1;
-                                            cmd_pos <= 0;
-                                            return_state <= RX_PARSE_INPUT_CMD;
-                                            com_rx_next <= 1'b1;
-                                            //main_state <= STATE_RX_NEXT;
-                                            main_state <= STATE_FATAL_ERROR; // for now we stop the simulation @TODO: proper error handeling
+                                if (JVS_HAS_COIN) begin
+                                    case(cmd_pos)
+                                        3'd0: begin
+                                            // Check REPORT byte
+                                            if (com_rx_byte == REPORT_NORMAL) begin
+                                                return_state <= RX_PARSE_INPUT_CMD;
+                                                main_state <= STATE_RX_NEXT;
+                                                com_rx_next <= 1'b1;
+                                            end else begin
+                                                com_src_cmd_next <= 1'b1;
+                                                cmd_pos <= 0;
+                                                return_state <= RX_PARSE_INPUT_CMD;
+                                                com_rx_next <= 1'b1;
+                                                //main_state <= STATE_RX_NEXT;
+                                                main_state <= STATE_FATAL_ERROR; // for now we stop the simulation @TODO: proper error handeling
+                                            end
                                         end
-                                    end
-                                    3'd1: begin
-                                        // com_rx_byte = first coin data byte
-                                        current_coin <= 0;
-                                        return_state <= RX_PARSE_COININP;
-                                        main_state <= RX_PARSE_COININP;
-                                    end
-                                endcase
+                                        3'd1: begin
+                                            // com_rx_byte = first coin data byte
+                                            current_coin <= 0;
+                                            return_state <= RX_PARSE_COININP;
+                                            main_state <= RX_PARSE_COININP;
+                                        end
+                                    endcase
+                                end else begin
+                                    main_state <= STATE_FATAL_ERROR;   // (left out: its command is never sent)
+                                end
                             end
                             CMD_ANLINP: begin
                                 case(cmd_pos)
@@ -2079,125 +2136,145 @@ module jvs_ctrl #(
                                 endcase
                             end
                             CMD_ROTINP: begin
-                                case(cmd_pos)
-                                    3'd0: begin
-                                        // Check REPORT byte
-                                        if (com_rx_byte == REPORT_NORMAL) begin
-                                            return_state <= RX_PARSE_INPUT_CMD;
-                                            main_state <= STATE_RX_NEXT;
-                                            com_rx_next <= 1'b1;
-                                        end else begin
-                                            com_src_cmd_next <= 1'b1;
-                                            cmd_pos <= 0;
+                                if (JVS_HAS_ROTARY) begin
+                                    case(cmd_pos)
+                                        3'd0: begin
+                                            // Check REPORT byte
+                                            if (com_rx_byte == REPORT_NORMAL) begin
+                                                return_state <= RX_PARSE_INPUT_CMD;
+                                                main_state <= STATE_RX_NEXT;
+                                                com_rx_next <= 1'b1;
+                                            end else begin
+                                                com_src_cmd_next <= 1'b1;
+                                                cmd_pos <= 0;
+                                                return_state <= RX_PARSE_INPUT_CMD;
+                                                main_state <= STATE_RX_NEXT;
+                                                com_rx_next <= 1'b1;
+                                            end
+                                        end
+                                        default: begin
+                                            // Check if more data or advance to next command
+                                            if (com_rx_remaining <= 1) begin
+                                                // Last byte, advance to next command
+                                                cmd_pos <= 0;
+                                                com_src_cmd_next <= 1'b1;
+                                            end
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end
-                                    end
-                                    default: begin
-                                        // Check if more data or advance to next command
-                                        if (com_rx_remaining <= 1) begin
-                                            // Last byte, advance to next command
-                                            cmd_pos <= 0;
-                                            com_src_cmd_next <= 1'b1;
-                                        end
-                                        return_state <= RX_PARSE_INPUT_CMD;
-                                        main_state <= STATE_RX_NEXT;
-                                        com_rx_next <= 1'b1;
-                                    end
-                                endcase
+                                    endcase
+                                end else begin
+                                    main_state <= STATE_FATAL_ERROR;   // (left out: its command is never sent)
+                                end
                             end
                             CMD_KEYINP: begin
-                                case(cmd_pos)
-                                    3'd0: begin
-                                        // Check REPORT byte
-                                        if (com_rx_byte == REPORT_NORMAL) begin
-                                            return_state <= RX_PARSE_INPUT_CMD;
-                                            main_state <= STATE_RX_NEXT;
-                                            com_rx_next <= 1'b1;
-                                        end else begin
-                                            com_src_cmd_next <= 1'b1;
-                                            cmd_pos <= 0;
+                                if (JVS_HAS_KEYCODE) begin
+                                    case(cmd_pos)
+                                        3'd0: begin
+                                            // Check REPORT byte
+                                            if (com_rx_byte == REPORT_NORMAL) begin
+                                                return_state <= RX_PARSE_INPUT_CMD;
+                                                main_state <= STATE_RX_NEXT;
+                                                com_rx_next <= 1'b1;
+                                            end else begin
+                                                com_src_cmd_next <= 1'b1;
+                                                cmd_pos <= 0;
+                                                return_state <= RX_PARSE_INPUT_CMD;
+                                                main_state <= STATE_RX_NEXT;
+                                                com_rx_next <= 1'b1;
+                                            end
+                                        end
+                                        default: begin
+                                            // Check if more data or advance to next command
+                                            if (com_rx_remaining <= 1) begin
+                                                // Last byte, advance to next command
+                                                cmd_pos <= 0;
+                                                com_src_cmd_next <= 1'b1;
+                                            end
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end
-                                    end
-                                    default: begin
-                                        // Check if more data or advance to next command
-                                        if (com_rx_remaining <= 1) begin
-                                            // Last byte, advance to next command
-                                            cmd_pos <= 0;
-                                            com_src_cmd_next <= 1'b1;
-                                        end
-                                        return_state <= RX_PARSE_INPUT_CMD;
-                                        main_state <= STATE_RX_NEXT;
-                                        com_rx_next <= 1'b1;
-                                    end
-                                endcase
+                                    endcase
+                                end else begin
+                                    main_state <= STATE_FATAL_ERROR;   // (left out: its command is never sent)
+                                end
                             end
                             CMD_SCRPOSINP: begin
-                                case(cmd_pos)
-                                    3'd0: begin
-                                        // Check REPORT byte
-                                        if (com_rx_byte == REPORT_NORMAL) begin
-                                            return_state <= RX_PARSE_INPUT_CMD;
-                                            main_state <= STATE_RX_NEXT;
-                                            com_rx_next <= 1'b1;
-                                        end else begin
-                                            com_src_cmd_next <= 1'b1;
-                                            cmd_pos <= 0;
-                                            return_state <= RX_PARSE_INPUT_CMD;
-                                            main_state <= STATE_RX_NEXT;
-                                            com_rx_next <= 1'b1;
+                                if (JVS_HAS_SCREEN_POS) begin
+                                    case(cmd_pos)
+                                        3'd0: begin
+                                            // Check REPORT byte
+                                            if (com_rx_byte == REPORT_NORMAL) begin
+                                                return_state <= RX_PARSE_INPUT_CMD;
+                                                main_state <= STATE_RX_NEXT;
+                                                com_rx_next <= 1'b1;
+                                            end else begin
+                                                com_src_cmd_next <= 1'b1;
+                                                cmd_pos <= 0;
+                                                return_state <= RX_PARSE_INPUT_CMD;
+                                                main_state <= STATE_RX_NEXT;
+                                                com_rx_next <= 1'b1;
+                                            end
                                         end
-                                    end
-                                    3'd1: begin
-                                        // com_rx_byte = X MSB: same entry as ANLINP (cmd_pos stays 1,
-                                        // it was reset to 0 here and the parser dropped the X MSB)
-                                        return_state <= RX_PARSE_SCRPOSINP;
-                                        main_state <= RX_PARSE_SCRPOSINP;
-                                    end
-                                endcase
+                                        3'd1: begin
+                                            // com_rx_byte = X MSB: same entry as ANLINP (cmd_pos stays 1,
+                                            // it was reset to 0 here and the parser dropped the X MSB)
+                                            return_state <= RX_PARSE_SCRPOSINP;
+                                            main_state <= RX_PARSE_SCRPOSINP;
+                                        end
+                                    endcase
+                                end else begin
+                                    main_state <= STATE_FATAL_ERROR;   // (left out: its command is never sent)
+                                end
                             end
                             CMD_MISCSWINP: begin
-                                case(cmd_pos)
-                                    3'd0: begin
-                                        // Check REPORT byte
-                                        if (com_rx_byte == REPORT_NORMAL) begin
-                                            return_state <= RX_PARSE_INPUT_CMD;
-                                            main_state <= STATE_RX_NEXT;
-                                            com_rx_next <= 1'b1;
-                                        end else begin
-                                            com_src_cmd_next <= 1'b1;
-                                            cmd_pos <= 0;
+                                if (JVS_HAS_MISC) begin
+                                    case(cmd_pos)
+                                        3'd0: begin
+                                            // Check REPORT byte
+                                            if (com_rx_byte == REPORT_NORMAL) begin
+                                                return_state <= RX_PARSE_INPUT_CMD;
+                                                main_state <= STATE_RX_NEXT;
+                                                com_rx_next <= 1'b1;
+                                            end else begin
+                                                com_src_cmd_next <= 1'b1;
+                                                cmd_pos <= 0;
+                                                return_state <= RX_PARSE_INPUT_CMD;
+                                                main_state <= STATE_RX_NEXT;
+                                                com_rx_next <= 1'b1;
+                                            end
+                                        end
+                                        default: begin
+                                            // Simple parsing - skip misc digital data (not implemented)
+                                            // Check if more data or advance to next command
+                                            if (com_rx_remaining <= 1) begin
+                                                // Last byte, advance to next command
+                                                cmd_pos <= 0;
+                                                com_src_cmd_next <= 1'b1;
+                                            end
                                             return_state <= RX_PARSE_INPUT_CMD;
                                             main_state <= STATE_RX_NEXT;
                                             com_rx_next <= 1'b1;
                                         end
-                                    end
-                                    default: begin
-                                        // Simple parsing - skip misc digital data (not implemented)
-                                        // Check if more data or advance to next command
-                                        if (com_rx_remaining <= 1) begin
-                                            // Last byte, advance to next command
-                                            cmd_pos <= 0;
-                                            com_src_cmd_next <= 1'b1;
-                                        end
-                                        return_state <= RX_PARSE_INPUT_CMD;
-                                        main_state <= STATE_RX_NEXT;
-                                        com_rx_next <= 1'b1;
-                                    end
-                                endcase
+                                    endcase
+                                end else begin
+                                    main_state <= STATE_FATAL_ERROR;   // (left out: its command is never sent)
+                                end
                             end
                             CMD_ANLOUT: begin
-                                // ANLOUT answer has no data: check the REPORT byte, advance the
-                                // command FIFO and read the next command's REPORT byte
-                                com_src_cmd_next <= 1'b1;
-                                cmd_pos <= 8'hFF;                    // RX_NEXT brings it back to 0
-                                return_state <= RX_PARSE_INPUT_CMD;
-                                main_state <= STATE_RX_NEXT;
-                                com_rx_next <= 1'b1;
+                                if (JVS_HAS_ANALOG_OUT) begin
+                                    // ANLOUT answer has no data: check the REPORT byte, advance the
+                                    // command FIFO and read the next command's REPORT byte
+                                    com_src_cmd_next <= 1'b1;
+                                    cmd_pos <= 8'hFF;                    // RX_NEXT brings it back to 0
+                                    return_state <= RX_PARSE_INPUT_CMD;
+                                    main_state <= STATE_RX_NEXT;
+                                    com_rx_next <= 1'b1;
+                                end else begin
+                                    main_state <= STATE_FATAL_ERROR;   // (left out: its command is never sent)
+                                end
                             end
                             CMD_OUTPUT1: begin
                                 case(cmd_pos)
@@ -2809,7 +2886,7 @@ module jvs_ctrl #(
                     
                     // Display jvs_nodes_r content for debugging
                     $display("[CONTROLLER][FATAL_ERROR] === JVS_NODES_R STATE DUMP ===");
-                    for (int dev = 0; dev < 2; dev++) begin
+                    for (int dev = 0; dev < jvs_node_info_pkg::MAX_JVS_NODES; dev++) begin
                         $display("[FATAL_ERROR] Device %d:", dev);
                         $display("  node_id: 0x%02X", jvs_nodes_r.node_id[dev]);
                         $display("  node_cmd_ver: 0x%02X", jvs_nodes_r.node_cmd_ver[dev]);

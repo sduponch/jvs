@@ -1,7 +1,11 @@
 
 // jvs_node_info_pkg.sv — Package defining the structure for JVS node information
 package jvs_node_info_pkg;
+`ifdef JVS_MAX_NODES
+  parameter int MAX_JVS_NODES   = `JVS_MAX_NODES;   // (a core that needs fewer nodes: VERILOG_MACRO "JVS_MAX_NODES=1")
+`else
   parameter int MAX_JVS_NODES   = 2;
+`endif
   parameter int NODE_NAME_SIZE  = 100;
   parameter int JVS_COIN_MAX    = 4;
 

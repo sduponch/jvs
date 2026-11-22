@@ -83,6 +83,22 @@ jvs_ctrl #(.MASTER_CLK_FREQ(MASTER_CLK_FREQ), .HAS_LINK_DETECT(0)) jvs_inst (
 - `vendor_rd_data = 0` means NULL pointers: standard init, no MAINID, no vendor frame.
 - Unused outputs left open; unused inputs tied to 0.
 
+### Area options (Verilog macros)
+
+`jvs_ctrl` is about 1,380 ALMs. A core short of room can drop the features it does not use with
+`set_global_assignment -name VERILOG_MACRO "NAME=1"` in its qsf. Without any macro nothing changes.
+
+| Macro | Removes | Saves (ALMs, fitted wrapper) |
+|---|---|---|
+| `JVS_MAX_NODES=1` | the second node (default 2) | ~70 |
+| `JVS_LITE` | rotary, keycode, screen position, misc switches, analog outputs | ~100 |
+| `JVS_NO_COIN` | coin inputs (coin1..4 and coin_count read 0) | ~60 |
+| all three | | ~245 (1,381 → 1,136) |
+
+`JVS_LITE` is an umbrella for `JVS_NO_ROTARY`, `JVS_NO_KEYCODE`, `JVS_NO_SCREEN_POS`, `JVS_NO_MISC` and
+`JVS_NO_ANALOG_OUT`, which can also be set one by one. A removed feature is not polled, so a board that
+reports it still works. The ports stay, so the instantiation does not change.
+
 ## 4. Buttons
 
 - `playerN_input_switch` is already in the **Pocket key layout**: bits 3:0 D-pad (up, down, left, right),
