@@ -166,6 +166,9 @@ OUTPUT1 base and recoil masks (0xF0..0xFF).
 
 ## 6. Axes, guns and recoil
 
+- Axes: 0xD8..0xDF P1 X, P1 Y .. P4 X, P4 Y; 0xE0..0xE3 a third axis Z for P1..P4 (`--pN-z`; a driving cabinet:
+  X the steering, Y the accelerator, Z the brake — Initial D8's 837-14572: `--p1-x 1:0 --p1-y 1:1 --p1-z 1:2`).
+  A core that uses two axes reads 0xD8..0xDF only and needs no change.
 - Axis byte: bit 7 defined, bits 6..4 node − 1, bit 3 inverted, bits 2..0 channel; value
   `node_analog[(node*8 + ch)*16 +: 16]`, inverted with `~`. **`MAX_JVS_NODES` is 2**: axes on nodes 3..8 are
   undefined.

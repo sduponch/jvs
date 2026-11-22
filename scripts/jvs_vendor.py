@@ -15,7 +15,9 @@ Table layout (256 bytes):
               bit 7 = defined, bits 6..4 = node - 1, bit 3 = inverted, bits 2..0 = channel.
               Drives the player joystick (pN_joy_state) and gun position:
               --p1-x 1:2 --p1-y 1:3 (node:CH), ":i" to invert the axis (--p1-x 1:0:i)
-  0xE0..0xE7  reserved (0)
+  0xE0..0xE3  player third axis (Z): P1 Z .. P4 Z, same byte format (--p1-z 1:2). A driving cabinet:
+              X the steering, Y the accelerator, Z the brake. Cores that know two axes only ignore it.
+  0xE4..0xE7  reserved (0)
   0xE8..0xFF  digital output profile (read by the core, not by jvs_ctrl):
                 0xE8, 0xEA, 0xEC, 0xEE: recoil trigger mask of P1, P2, P3, P4, 2 bytes each in
                            JVS order (SWINP player bytes 1, 2; 08 00 = switch LEFT): the
@@ -29,6 +31,9 @@ Table layout (256 bytes):
 Default table (MAINID of the adapter sent to every node, no vendor frame):
   jvs_vendor.py --node all --mainid "TFURY.COM; JVS Adapter V1.0" -o jvs_vendor.bin
 
+Example (Initial D8, Sega 837-14572: steering A/D 1, gas A/D 2, brake A/D 3 = CH0..2 of node 1):
+  jvs_vendor.py --p1-x 1:0 --p1-y 1:1 --p1-z 1:2 -o jvs_initiald8.bin
+
 Example (Time Crisis 4, Namco NA-JV on node 1, recoil solenoid on output 1, lamps A0):
   jvs_vendor.py --node 1 --mainid "namco ltd.;S246;VerA;JPN" --frame "70 18 50 4C 14 40" \\
                 --dout-base "00 A0 00" --dout-recoil-mask "80 00 00" -o jvs_vendor.bin
@@ -39,8 +44,9 @@ import sys
 
 TABLE_SIZE = 256
 HEADER_SIZE = 16
-DATA_END = 0xD8           # 0xD8..0xDF: player axes, 0xE0..0xE7: reserved, 0xE8..: outputs
+DATA_END = 0xD8           # 0xD8..0xDF: player X / Y axes, 0xE0..0xE3: player Z axes, 0xE8..: outputs
 AXIS_BASE = 0xD8
+AXIS_Z_BASE = 0xE0
 TRIG_BASE = 0xE8
 DOUT_BASE = 0xF0
 TRIGGER_LEFT = bytes([0x08, 0x00])   # default recoil trigger: switch LEFT (Time Crisis 4 wiring)
@@ -81,8 +87,8 @@ def build(nodes, dout=None, axes=None):
                     sys.exit(f"node {node}: frame length must be 1..255 bytes")
                 data += bytes([len(f)]) + f
             table[2 * (node - 1) + 1] = put(bytes(data) + b"\x00")
-    for a, v in (axes or {}).items():          # a = 2 * player + (0 X, 1 Y), v = (node, CH, inverted)
-        table[AXIS_BASE + a] = 0x80 | ((v[0] - 1) << 4) | (0x08 if v[2] else 0) | v[1]
+    for a, v in (axes or {}).items():          # a = 2 * player + (0 X, 1 Y), or 8 + player for Z; v = (node, CH, inverted)
+        table[(AXIS_BASE + a) if a < 8 else (AXIS_Z_BASE + a - 8)] = 0x80 | ((v[0] - 1) << 4) | (0x08 if v[2] else 0) | v[1]
     if dout is not None:
         table[DOUT_BASE] = 0x01
         table[DOUT_BASE + 1:DOUT_BASE + 4] = dout[0]
@@ -109,7 +115,7 @@ def main():
     for n in (2, 3, 4):
         ap.add_argument(f"--recoil-trigger-p{n}", help=f"same for P{n}")
     for n in (1, 2, 3, 4):
-        for axis in ("x", "y"):
+        for axis in ("x", "y", "z"):
             ap.add_argument(f"--p{n}-{axis}", help=f'P{n} {axis.upper()} axis: "node:CH[:i]", e.g. "1:2", '
                             f'"1:0:i" = inverted (node 1..8, CH 0..7)')
     ap.add_argument("-o", "--output", required=True, help="output file (.bin, or .hex with --hex)")
@@ -143,7 +149,7 @@ def main():
             i += 2 if a in ("-o", "--output", "--dout-base", "--dout-recoil-mask", "--dout-recoil-mask-p2",
                             "--dout-recoil-mask-p3", "--dout-recoil-mask-p4", "--recoil-trigger",
                             "--recoil-trigger-p2", "--recoil-trigger-p3", "--recoil-trigger-p4") \
-                 or (a.startswith("--p") and a[-2:] in ("-x", "-y")) else 1
+                 or (a.startswith("--p") and a[-2:] in ("-x", "-y", "-z")) else 1
 
     dout = None
     masks = (args.dout_recoil_mask, args.dout_recoil_mask_p2, args.dout_recoil_mask_p3, args.dout_recoil_mask_p4)
@@ -165,7 +171,7 @@ def main():
         dout = (three(args.dout_base), recoil, [trigger(t, m) for t, m in zip(trig_args, recoil)])
     axes = {}
     for n in range(4):
-        for k, axis in enumerate(("x", "y")):
+        for k, axis in enumerate(("x", "y", "z")):
             v = getattr(args, f"p{n + 1}_{axis}")
             if v:
                 f = v.split(":")
@@ -174,9 +180,10 @@ def main():
                 node, ch = int(f[0]), int(f[1])
                 if not (1 <= node <= MAX_NODES and 0 <= ch <= 7):
                     sys.exit(f"--p{n + 1}-{axis}: node 1..{MAX_NODES}, CH 0..7")
-                axes[2 * n + k] = (node, ch, len(f) == 3)
+                axes[2 * n + k if k < 2 else 8 + n] = (node, ch, len(f) == 3)
     if axes:
-        print("player axes: " + ", ".join(f"P{a // 2 + 1} {'XY'[a % 2]} = node {v[0]} CH{v[1]}{' inverted' if v[2] else ''}"
+        name = lambda a: f"P{a // 2 + 1} {'XY'[a % 2]}" if a < 8 else f"P{a - 7} Z"
+        print("player axes: " + ", ".join(f"{name(a)} = node {v[0]} CH{v[1]}{' inverted' if v[2] else ''}"
                                           for a, v in sorted(axes.items())))
     table = build(nodes, dout, axes)
     if args.hex:
