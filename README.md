@@ -297,11 +297,28 @@ Some boards need host specific frames after the standard init (the Namco NA-JV o
 | MAINID entry | `00` terminated string, sent as `15 <string> 00` |
 | vendor entry | frames `[L][L bytes: command + data]` ... `[00]`, one JVS frame each |
 
-They are sent after the feature check of the node, 10 ms apart (the NA-JV ignores a frame sent 0.5 ms after the previous answer); a missing answer does not stop the init. The pointers read for each node are copied to `jvs_nodes.node_mainid_ptr` / `node_vendor_ptr`. An all zero table (or `vendor_rd_data` tied to 0) gives a standard init. `scripts/jvs_vendor.py` builds the table; it can also add the blocks used by the JVS Debugger core at the end of the table (player axes, gun triggers, recoil masks, OUTPUT1 base, `0xD8..0xFF`).
+They are sent after the feature check of the node, 10 ms apart (the NA-JV ignores a frame sent 0.5 ms after the previous answer); a missing answer does not stop the init. The pointers read for each node are copied to `jvs_nodes.node_mainid_ptr` / `node_vendor_ptr`. An all zero table (or `vendor_rd_data` tied to 0) gives a standard init. `scripts/jvs_vendor.py` builds the table; it can also add the blocks the cores read at the end of the table (`0xD8..0xFF`, not used by `jvs_ctrl`): player axes X / Y (`0xD8..0xDF`, `--pN-x` / `--pN-y`), a third axis Z per player (`0xE0..0xE3`, `--pN-z`: a driving cabinet's brake beside the steering and the accelerator), gun triggers, recoil masks, OUTPUT1 base.
 
 ```bash
 python3 scripts/jvs_vendor.py --node 1 --mainid "namco ltd.;S246;VerA;JPN" --frame "70 18 50 4C 14 40" -o jvs_vendor.bin
+python3 scripts/jvs_vendor.py --p1-x 1:0 --p1-y 1:1 --p1-z 1:2 -o jvs_initiald8.bin   # Initial D8: steering, gas, brake
 ```
+
+### Area options
+
+`jvs_ctrl` is about 1,380 ALMs. A core short of room can leave out what it does not use with Verilog macros
+(`set_global_assignment -name VERILOG_MACRO "NAME=1"`); without any, nothing changes:
+
+| Macro | Leaves out | ALMs saved |
+|---|---|---|
+| `JVS_MAX_NODES=1` | the second node (default 2) | ~70 |
+| `JVS_LITE` | rotary, keycode, screen position, misc switches, analog outputs | ~100 |
+| `JVS_NO_COIN` | coin inputs (read 0) | ~60 |
+| all three | | ~245 (1,381 → 1,136) |
+
+`JVS_LITE` stands for `JVS_NO_ROTARY`, `JVS_NO_KEYCODE`, `JVS_NO_SCREEN_POS`, `JVS_NO_MISC` and `JVS_NO_ANALOG_OUT`,
+which can also be set one by one. A feature left out is not polled; the ports stay. The SNES Analogizer core uses
+all three. `SKILL.md` gives the integration notes (pins, profile slot, Chip32 loaders, menu limits, guns, recoil).
 
 ### Debug and per node outputs
 
