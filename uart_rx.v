@@ -29,7 +29,7 @@ module uart_rx
   reg           r_Rx_Data_R = 1'b1;
   reg           r_Rx_Data   = 1'b1;
    
-  reg [8:0]     r_Clock_Count = 0; // Extended to 9 byte to allow 115 200 bauds from main 50Mhz clk
+  reg [$clog2(CLKS_PER_BIT+1)-1:0] r_Clock_Count = 0; // wide enough for CLKS_PER_BIT (833 at 96 MHz, 115 200 bauds)
   reg [2:0]     r_Bit_Index   = 0; //8 bits total
   reg [7:0]     r_Rx_Byte     = 0;
   reg           r_Rx_DV       = 0;

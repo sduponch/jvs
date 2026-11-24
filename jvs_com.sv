@@ -49,12 +49,12 @@ module jvs_com
     output reg [7:0]    rx_byte,       // Current data byte
     output reg          rx_ready,      // Data in rx_byte is valid (for BRAM timing)
     input  wire         rx_next,       // Pulse to get next byte
-    output reg [BUFFER_ADDR_BITS-1:0] rx_remaining, // Auto-sized bytes remaining counter
+    output reg [$clog2(JVS_BUFFER_SIZE)-1:0] rx_remaining, // Auto-sized bytes remaining counter (= BUFFER_ADDR_BITS)
     output reg [7:0]    src_node,      // Source node of response
     output reg [7:0]    src_cmd,       // CMD from command FIFO
     output reg [7:0]    src_cmd_status, // STATUS byte decoded from JVS response
     input  wire         src_cmd_next,  // Pulse to get next command from FIFO
-    output reg [CMD_ADDR_BITS:0] src_cmd_count, // Auto-sized command count with overflow bit
+    output reg [$clog2(CMD_FIFO_SIZE):0] src_cmd_count, // Auto-sized command count with overflow bit (= CMD_ADDR_BITS)
     output reg          rx_complete,   // Pulse when frame complete
     output reg          rx_error,       // Checksum or format error
     input  wire         rx_processing_done, // Signal that RX processing is complete, ready for TX
@@ -86,6 +86,7 @@ module jvs_com
     localparam [3:0] TX_LENGTH       = 4'h4;
     localparam [3:0] TX_DATA         = 4'h5;
     localparam [3:0] TX_DATA_READ    = 4'hA;  // Wait for BRAM read data
+    localparam [3:0] TX_DATA_ESC     = 4'hB;  // Second byte of an escaped data byte
     localparam [3:0] TX_CHECKSUM     = 4'h6;
     localparam [3:0] TX_TRANSMIT_BYTE = 4'h7;
     localparam [3:0] TX_TRANSMIT_BYTE_DONE = 4'h8;
@@ -513,29 +514,31 @@ module jvs_com
                 TX_DATA_READ: begin
                     // Wait for BRAM read data to be valid
                     if (tx_bram_rd_valid) begin
+                        // Checksum of the unescaped byte (spec: escaping is applied after the SUM)
+                        tx_checksum <= tx_checksum + tx_bram_rd_data;
+                        tx_data_idx <= tx_data_idx + 1;
                         if (needs_escape(tx_bram_rd_data)) begin
-                            if (!tx_escape_pending) begin
-                                uart_tx_byte <= JVS_ESCAPE;
-                                tx_escape_pending <= 1'b1;
-                                tx_escape_byte <= get_escape_byte(tx_bram_rd_data);
-                                tx_next_state <= TX_DATA_READ;  // Revenir pour envoyer l'échappement
-                            end else begin
-                                uart_tx_byte <= tx_escape_byte;
-                                tx_escape_pending <= 1'b0;
-                                tx_checksum <= tx_checksum + tx_bram_rd_data;
-                                tx_data_idx <= tx_data_idx + 1;
-                                tx_next_state <= TX_DATA;  // Continuer avec le prochain byte
-                            end
+                            // Send D0 now, the escaped byte from TX_DATA_ESC (tx_bram_rd_valid is
+                            // a one cycle pulse: the data byte cannot be read again)
+                            uart_tx_byte <= JVS_ESCAPE;
+                            tx_escape_pending <= 1'b1;
+                            tx_escape_byte <= get_escape_byte(tx_bram_rd_data);
+                            tx_next_state <= TX_DATA_ESC;
                         end else begin
                             uart_tx_byte <= tx_bram_rd_data;
-                            tx_checksum <= tx_checksum + tx_bram_rd_data;
-                            tx_data_idx <= tx_data_idx + 1;
                             tx_next_state <= TX_DATA;  // Continuer avec le prochain byte
                         end
                         tx_state <= TX_TRANSMIT_BYTE;
                     end
                 end
                 
+                TX_DATA_ESC: begin
+                    uart_tx_byte <= tx_escape_byte;
+                    tx_escape_pending <= 1'b0;
+                    tx_next_state <= TX_DATA;
+                    tx_state <= TX_TRANSMIT_BYTE;
+                end
+
                 TX_CHECKSUM: begin
                     if (needs_escape(tx_checksum)) begin
                         if (!tx_escape_pending) begin
@@ -608,7 +611,7 @@ module jvs_com
             rx_ready <= 1'b0;
             rx_data_idx <= 0;
             rx_checksum_calc <= 0;
-            rx_escape_mode <= 1'b0;
+            rx_escape_mode = 1'b0;          // blocking, as in handle_escape_rx (ref argument)
             frames_rx_count <= 0;
             checksum_errors_count <= 0;
             rx_state_debug <= RX_IDLE;
@@ -646,7 +649,7 @@ module jvs_com
                         if (uart_rx_data == JVS_SYNC) begin
                             rx_checksum_calc <= 0;
                             rx_data_idx <= 0;
-                            rx_escape_mode <= 1'b0;
+                            rx_escape_mode = 1'b0;    // blocking, as in handle_escape_rx
                             rx_length_internal <= 0;  // CRITICAL: Reset length for new frame
                             rx_state <= RX_NODE;
                         end else begin
@@ -722,8 +725,10 @@ module jvs_com
                     if (rx_bram_rd_addr == 0) begin
                         // First read: STATUS byte
                         src_cmd_status <= rx_bram_rd_data;
-                        // Issue read for first REPORT byte
-                        rx_read_idx <= rx_read_idx + 1; 
+                        // Issue read for first REPORT byte (address 1). rx_read_idx keeps
+                        // the address of the byte presented on rx_byte: rx_next then reads
+                        // rx_read_idx + 1 = 2, the first data byte. (It used to be incremented
+                        // here as well, so the first rx_next skipped the first data byte.)
                         rx_bram_rd_en <= 1'b1;
                         rx_bram_rd_addr <= rx_read_idx;
                     end else begin

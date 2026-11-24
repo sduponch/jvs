@@ -60,3 +60,14 @@ Thumbs.db
 # Generated files
 *.mif.bak
 *.hex.bak
+# Simulation outputs (simu/Makefile)
+simu/work_*/
+simu/obj_*/
+simu/*.build
+simu/*.vcd
+simu/sim_jvs_dump.hex
+simu/vendor_*.hex
+# Replay scripts are generated from captures/*.bin by simu/Makefile
+simu/captures/*.replay
+# Python bytecode
+__pycache__/

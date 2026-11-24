@@ -5,6 +5,131 @@ All notable changes to the JVS protocol implementation will be documented in thi
 ## [Unreleased]
 
 ### Added
+- `jvs_bus_state_t` enum in `jvs_node_info_pkg` and `o_bus_state` output on `jvs_ctrl`
+  (NO_DEVICE / ADDRESSING / INIT / READY / ERROR / LINK_LOST)
+- `i_link` input and `HAS_LINK_DETECT` parameter: no traffic while no device is plugged,
+  full re-initialization on hot-plug
+- 2-FF synchronization and debounce (`LINE_DEBOUNCE_MS`) on SENSE and LINK inputs
+- SENSE based link supervision: `JVS_LINK_LOST` state on unplug while polling, resume
+  if the device comes back addressed, full re-init after `RELINK_TIMEOUT_MS`
+- SETADDR without answer now restarts from the bus reset (hot-plug of a device
+  holding a stale address)
+- `node_analog` output: the 8 analog channels of every node (debug/display)
+- `coin_status` output: raw {condition, counter} of each coin slot (debug/display)
+- `jvs_bus_logger`: decodes both serial lines and records every byte plus SETUP / LINK
+  changes with a microsecond timestamp (jvs_dump format, see the module header), and
+  RS485 DIR changes (type 04) to check the driver enable / release timing
+- `jvs_bus_logger` ring mode (`ring` input) and `JVSDUMP2` format (8-word header: flags,
+  oldest entry index): used by the core sniffer mode to keep the most recent traffic
+- `jvs_bus_logger` `sync_start` input / `waiting` output: nothing is recorded before the
+  first SYNC byte (E0), so a capture armed before the host is powered on starts on a
+  frame boundary
+- `scripts/jvs_dump.py` reads JVSDUMP1/2, reorders ring captures, and in sniffer captures
+  tells host requests from board answers by their destination node (replayable too)
+- `scripts/jvs_dump.py` reports the measured RS485 timing (DIR on -> first TX byte,
+  last TX byte -> DIR off)
+- `scripts/jvs_dump.py`: decodes a capture frame by frame (checksums checked) and exports
+  a replay script (`--replay`)
+- Simulation `tb_capture_replay`: replays a real hardware capture against the controller
+  (request driven), checks that every frame sent is identical to the captured one and
+  that the decoded values match, per node. Reference captures in `simu/captures/`
+  (`sega_838-13683B.bin`, `sega_838-13683B_x2.bin` with 2 chained boards) and
+  `naomi_tekken6_io_board_2.jvs`: oscilloscope capture of a NAOMI host with the
+  "No Brand;NAOMI Converter98701;ver2.0" board, previously listed as incompatible: its
+  742 frames now replay identically. Text captures (`.jvs`, one frame per line) are
+  converted with `jvs_dump.py --replay` (`--prepend-resets`, `--drop`, see `<name>.opts`)
+- Simulation `tb_smart_device` (was test_03): identification, input polling, digital
+  outputs and link recovery against the smart device model, with distinctive values and
+  automatic PASS/FAIL checks
+- `simu/Makefile`: `make smart`, `make replay`, `make regression` (smart + every capture),
+  `SIM=questa|verilator`, `FAST=1` (`JVS_SIM_FAST`: shortened startup / reset delays,
+  full regression in ~20 s). Obsolete tests and helper files removed
+- ANLOUT (33): `output_analog` input on `jvs_ctrl` (8 x 16-bit channels), sent to every
+  node declaring analog outputs with the declared channel count (e.g. the cabinet top
+  light ramp driven by NAOMI hosts on channel 1)
+- Vendor init table (`vendor_rd_addr` / `vendor_rd_data` ports, 256 bytes owned by the
+  integration): per node a MAINID pointer and a vendor frames pointer (00 = NULL). After the
+  feature check the controller sends MAINID (15) <string> 00 and the vendor frames
+  ([L][command + data]...[00]) of the node, 10 ms apart (the NA-JV ignores a frame sent
+  0.5 ms after the previous answer); answers are not parsed. Nothing vendor specific
+  in the RTL: e.g. the Namco NA-JV (Time Crisis 4) only drives its outputs after MAINID
+  "namco ltd.;S246;VerA;JPN" and `70 18 50 4C 14 40`, given by the table.
+  `scripts/jvs_vendor.py` builds the table; `make smart_namco` (part of `make regression`)
+  checks both frames with the TC4 table, the generic test checks that an empty table sends
+  nothing
+- `output_digital_ch1` replaced by `p1_output_digital` ... `p4_output_digital` (24 bits:
+  the 3rd OUTPUT1 data byte is sent, was always 00): each node receives in OUTPUT1 the OR
+  of the outputs of its own players (players numbered across the chained nodes, as the
+  switch inputs).
+  `scripts/jvs_vendor.py` can add a digital output profile to the table (`--dout-base`,
+  `--dout-recoil-mask`), used by the core for OUTPUT1 and the gun recoil bits
+- `output_node` input on `jvs_ctrl`: OUTPUT1 / ANLOUT sent only to the given node
+  address (0 = every node declaring outputs, previous behaviour)
+- Simulation: the smart device model checks the OUTPUT1 / ANLOUT data it receives, escapes
+  its answers and decodes escaped requests per the spec (analog CH7 = E0D0 and ANLOUT
+  channel 0 = E000 exercise both directions)
+- CI: `simulation-regression` job (Verilator, pinned docker image) runs before the
+  Quartus build
+
+### Fixed
+- RX byte stream (validated in simulation):
+  - `jvs_com`: `rx_read_idx` was incremented once too many when presenting the first
+    REPORT byte, so the first `rx_next` skipped the first data byte of every answer
+  - `jvs_ctrl` STATE_RX_NEXT used the stale `rx_ready` of the previous byte during its
+    first cycle and could return before the next byte was read
+  - Both bugs partially compensated each other depending on each parser's timing:
+    REPORT byte stored in place of the first character of the node name, CMD/JVS/COM
+    revisions read as 0x01, analog channels shifted by one (last channel lost), coin
+    slot 2 never parsed. Parsers re-aligned: the dispatcher checks the REPORT byte, coin
+    and analog parsers use the same structure as the switch parser and resume the
+    dispatcher on the next REPORT byte without an extra read
+- `jvs_com` TX escape: a data byte equal to E0 or D0 stalled the transmitter (it waited
+  for a BRAM read already consumed). Now sent as D0 DF / D0 CF with the checksum computed
+  on the unescaped byte, as required by the spec
+- Polling stopped after the feature check with the Namco NA-JV (Time Crisis 4), the
+  controller ended in STATE_FATAL_ERROR:
+  - SCRPOSINP (25): the dispatcher reset cmd_pos before the parser, which dropped the
+    X MSB and read the next REPORT byte as Y LSB, then resumed one byte too far
+  - SWINP (20) with more than 16 buttons per player (3 bytes, 24 buttons): the 3rd byte
+    was read as the next command's REPORT byte. Extra bytes are now skipped
+  - The smart device model declares a screen position channel and 24 buttons per player
+    (distinctive 3rd bytes, Y = 87D0 escaped) to cover both cases
+- `jvs_bus_logger` `full` output is registered: the combinational compare, read from the
+  core clock domain, could glitch when the entry counter changed several bits at once and
+  trigger the auto save of an incomplete init capture (14336 entries instead of 16380)
+- `jvs_dump.py` labelled every ring capture as a sniffer capture (the debugger also uses
+  the ring buffer once its init capture is saved): sniffer captures are now recognized by
+  the absence of TX / DIR entries
+- `jvs_com` port widths used localparams declared later in the module (rejected by Questa)
+- No recovery after answer timeouts: the commands of unanswered frames stayed in the
+  `jvs_com` command FIFO (later answers parsed with the wrong commands, FIFO eventually
+  full) and polling timeouts never re-initialized the bus. `jvs_com` is now flushed on
+  every timeout, and while polling a timeout restarts the full init sequence when SENSE
+  reports "not addressed" (device reset / power cycled) or after 3 consecutive timeouts
+- JVSREV (12) and COMMVER (13) requests never loaded the answer timeout: WAIT_RX timed
+  out immediately while the frame was still being transmitted (hidden until timeouts
+  started to flush `jvs_com`)
+- OUTPUT1 (32) is sent to every node declaring digital outputs (was single player boards
+  only) with ceil(outputs / 8) data bytes (was always 3); its REPORT-only answer is parsed
+  with the same alignment rule as the other commands
+- Analog channels were re-centered (0x8000) on every analog poll, making all analog
+  outputs glitch to center for a few microseconds every polling cycle
+- Chained nodes overwrote each other's analog channels: channels are now stored one
+  after the other (node 2 channels follow node 1 channels), like players and coins
+- Addressing stops at `MAX_JVS_NODES` (node_count could exceed the node storage)
+- Next node info initialization wrote at index addr+1 instead of addr (out of bounds)
+- `player_count` was not cleared on reset and kept growing on each re-initialization
+- `timeout_retry_count` now saturates instead of wrapping around after 255 timeouts
+
+### Known issues
+- Switch inputs: push buttons 9 and 10 (bits 12/13) are only kept for P1; they are
+  forced to 0 for P2..P4 (boards with more than 8 buttons, e.g. 15 on a chained 838-13683B)
+- Simulation does not cover digital/analog outputs, rotary, keycode, screen position and
+  misc inputs yet (the simulated board does not declare them)
+
+## [0.2.0-dev] - previous unreleased work
+
+### Added
 - Modular architecture with jvs_com communication layer
 - Standalone submodule structure for GitHub distribution
 - Comprehensive README.md with implementation status

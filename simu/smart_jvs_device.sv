@@ -17,7 +17,10 @@
 `default_nettype none
 
 module smart_jvs_device #(
-    parameter MASTER_CLK_FREQ = 50_000_000
+    parameter MASTER_CLK_FREQ = 50_000_000,
+    // 1: identifies as the Namco NA-JV and answers MAINID (15) / Namco command 70, which the
+    // controller must then send after the feature check (as the Time Crisis 4 host does)
+    parameter bit NAMCO = 1'b0
 ) (
     input logic clk,
     input logic rst,
@@ -275,6 +278,8 @@ module smart_jvs_device #(
 
     logic [7:0] rx_length;         // Length of current incoming frame
     logic [7:0] rx_counter = 8'h00;
+    logic       rx_mark = 1'b0;      // MARK (D0) received, next byte is (byte + 1)
+    logic [7:0] rxb;                 // decoded received byte
     logic [7:0] rx_checksum = 8'h00;
     logic rx_frame_complete;       // Flag indicating frame has been processed and ready for next step
 
@@ -293,6 +298,7 @@ module smart_jvs_device #(
     } jvs_rx_state_t;
 
     jvs_rx_state_t rx_state = RX_IDLE;
+    jvs_rx_state_t rx_state_eff;       // rx_state, or RX_IDLE on a raw SYNC byte (decoded below)
 
     // État de transmission de réponse
     typedef enum logic [2:0] {
@@ -312,7 +318,10 @@ module smart_jvs_device #(
 
     integer response_length = 0;
     integer response_index = 0;
-    logic need_response = 0;
+    logic need_response = 0;      // set by analyze_and_respond() (receive block only)
+    // Response request handshake between the receive and transmit blocks (one writer each,
+    // as required by Verilator): a response is pending while resp_req != resp_ack
+    logic resp_req = 0, resp_ack = 0;
 
     // Compteur pour délai RS485 setup time (1ms)
     localparam logic [31:0] SETUP_TIME_CYCLES = MASTER_CLK_FREQ / 1_100_000; // 100us
@@ -345,6 +354,43 @@ module smart_jvs_device #(
         rx_buffer[5] = 8'h05;           // CHECKSUM (00+03+01+01 = 05)
         response_length = 6;
         $display("[SMART_JVS] Préparation réponse ACK");
+    endfunction
+
+    // Namco init commands received (checked by the testbench)
+    localparam string NAMCO_NAME = "namco ltd.;NA-JV;Ver1.00;JPN,Multipurpose.";
+    localparam string EXP_MAINID = "namco ltd.;S246;VerA;JPN";
+    integer mainid_rx_frames = 0, namco70_rx_frames = 0;
+    logic   mainid_rx_ok = 0, namco70_rx_ok = 0;
+
+    function automatic void prepare_namco_id_response();
+        integer idx = 0;
+        logic [7:0] checksum = 0;
+        rx_buffer[idx++] = 8'hE0;
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = 8'h00;       // LENGTH (set below)
+        rx_buffer[idx++] = 8'h01;       // STATUS
+        rx_buffer[idx++] = 8'h01;       // REPORT
+        for (int i = 0; i < NAMCO_NAME.len(); i++) rx_buffer[idx++] = NAMCO_NAME[i];
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[2] = idx - 3 + 1;
+        for (int i = 1; i < idx; i++) checksum += rx_buffer[i];
+        rx_buffer[idx++] = checksum;
+        response_length = idx;
+    endfunction
+
+    // REPORT only answer (MAINID), or REPORT + one data byte (Namco 70: E0 00 04 01 01 01 07)
+    function automatic void prepare_report_response(input bit with_data, input logic [7:0] data);
+        integer idx = 0;
+        logic [7:0] checksum = 0;
+        rx_buffer[idx++] = 8'hE0;
+        rx_buffer[idx++] = 8'h00;
+        rx_buffer[idx++] = with_data ? 8'h04 : 8'h03;
+        rx_buffer[idx++] = 8'h01;       // STATUS
+        rx_buffer[idx++] = 8'h01;       // REPORT
+        if (with_data) rx_buffer[idx++] = data;
+        for (int i = 1; i < idx; i++) checksum += rx_buffer[i];
+        rx_buffer[idx++] = checksum;
+        response_length = idx;
     endfunction
 
     // Réponse Device ID (basée sur Tekken 6)
@@ -411,6 +457,16 @@ module smart_jvs_device #(
     endfunction
 
     // Réponse Feature Check (basée sur Tekken 6)
+    // Digital outputs declared by the simulated board and last OUTPUT1 (32) request received
+    localparam logic [7:0] EXP_DOUT_COUNT = 8'd12;           // 12 outputs -> 2 data bytes
+    localparam logic [7:0] EXP_AOUT_COUNT = 8'd2;            // 2 analog output channels
+    logic [7:0]  aout_rx_count = 8'hFF;                      // channel count of the last 33 command
+    logic [15:0] aout_rx_data [8];                           // its channel values
+    integer      aout_rx_frames = 0;                         // number of 33 commands received
+    logic [7:0] dout_rx_count = 8'hFF;                       // byte count of the last 32 command
+    logic [7:0] dout_rx_data [3];                            // its data bytes
+    integer     dout_rx_frames = 0;                          // number of 32 commands received
+
     function automatic void prepare_feature_response();
         // E00010010101020C0002020000030800000030
         integer idx = 0;
@@ -424,67 +480,168 @@ module smart_jvs_device #(
         // Features from Tekken 6 (exact copy)
         rx_buffer[idx++] = 8'h01;       // Digital inputs
         rx_buffer[idx++] = 8'h02;       // 2 players
-        rx_buffer[idx++] = 8'h0C;       // 12 buttons per player
+        rx_buffer[idx++] = 8'h18;       // 24 buttons per player (3 bytes, as the TC4 NA-JV;
+                                        // the 12 button / 2 byte case is covered by the SEGA replays)
         rx_buffer[idx++] = 8'h00;
-        rx_buffer[idx++] = 8'h02;       // Analog inputs
-        rx_buffer[idx++] = 8'h02;       // 2 channels
+        rx_buffer[idx++] = 8'h02;       // Coin inputs (function 02)
+        rx_buffer[idx++] = 8'h02;       // 2 coin slots
         rx_buffer[idx++] = 8'h00;       //
         rx_buffer[idx++] = 8'h00;       //
-        rx_buffer[idx++] = 8'h03;       // Digital outputs
-        rx_buffer[idx++] = 8'h08;       // 8 outputs
+        rx_buffer[idx++] = 8'h03;       // Analog inputs (function 03)
+        rx_buffer[idx++] = 8'h08;       // 8 channels
+        rx_buffer[idx++] = 8'h00;       //
+        rx_buffer[idx++] = 8'h00;       //
+        rx_buffer[idx++] = 8'h12;       // General purpose (digital) outputs (function 12)
+        rx_buffer[idx++] = EXP_DOUT_COUNT; // number of outputs
+        rx_buffer[idx++] = 8'h00;       //
+        rx_buffer[idx++] = 8'h00;       //
+        rx_buffer[idx++] = 8'h06;       // Screen position inputs (function 06), as the TC4 NA-JV
+        rx_buffer[idx++] = 8'h10;       // X bits
+        rx_buffer[idx++] = 8'h10;       // Y bits
+        rx_buffer[idx++] = 8'h01;       // 1 channel
+        rx_buffer[idx++] = 8'h13;       // Analog outputs (function 13)
+        rx_buffer[idx++] = EXP_AOUT_COUNT; // number of channels
         rx_buffer[idx++] = 8'h00;       //
         rx_buffer[idx++] = 8'h00;       //
         rx_buffer[idx++] = 8'h00;       // End of features
 
-        // Checksum exact de Tekken 6
-        rx_buffer[idx++] = 8'h30;       // CHECKSUM from real capture
+        // LENGTH = STATUS + data + checksum, CHECKSUM = sum of all bytes after SYNC
+        begin
+            logic [7:0] checksum = 0;
+            rx_buffer[2] = idx - 3 + 1;
+            for (int i = 1; i < idx; i++) checksum += rx_buffer[i];
+            rx_buffer[idx++] = checksum;
+        end
 
         response_length = idx;
         $display("[SMART_JVS] Préparation réponse Feature Check (%d bytes)", response_length);
     endfunction
 
     // Input polling response (0x20) - Réponse aux commandes multicommandes SWINP/COININP/ANLINP
+    // Same layout as a real capture (E0001E01010000000000010000000001CE00BB00...), but with
+    // distinctive values so that any byte / channel shift is detected by the testbench.
+    // The expected values are exported as localparams (EXP_*) for the testbench checks.
+    localparam logic [7:0]  EXP_SYS_SW   = 8'h00;
+    localparam logic [15:0] EXP_P1_SW    = 16'h8142;          // {byte1, byte2}
+    localparam logic [15:0] EXP_P2_SW    = 16'h2418;
+    localparam logic [7:0]  EXP_P1_SW3   = 8'h5A;             // 3rd byte (buttons 17-24, not mapped)
+    localparam logic [7:0]  EXP_P2_SW3   = 8'hA5;
+    localparam logic [15:0] EXP_COIN [2] = '{16'h0002, 16'h0005};   // {cond(2) counter(14)}
+    // CH7 = E0D0: sent escaped on the wire (D0 DF D0 CF) to check the controller unescaping
+    localparam logic [15:0] EXP_ANALOG [8] = '{16'h1234, 16'h5678, 16'h9ABC, 16'hDEF0,
+                                               16'h1122, 16'h3344, 16'h5566, 16'hE0D0};
+    // Screen position (25): Y LSB = D0 (escaped on the wire)
+    localparam logic [15:0] EXP_SCR_X = 16'h4321;
+    localparam logic [15:0] EXP_SCR_Y = 16'h87D0;
+    integer scrpos_rx_frames = 0;
+
+    // JVS escaping of a prepared answer (rx_buffer[0..response_length-1], E0 SYNC first):
+    // every following E0 / D0 byte is sent as D0 DF / D0 CF
+    function automatic void escape_response();
+        logic [7:0] tmp[0:63];
+        integer n = 1;
+        tmp[0] = rx_buffer[0];
+        for (int i = 1; i < response_length; i++) begin
+            if (rx_buffer[i] == 8'hE0 || rx_buffer[i] == 8'hD0) begin
+                tmp[n++] = 8'hD0;
+                tmp[n++] = rx_buffer[i] - 8'h01;
+            end else
+                tmp[n++] = rx_buffer[i];
+        end
+        for (int i = 0; i < n; i++) rx_buffer[i] = tmp[i];
+        response_length = n;
+    endfunction
     function automatic void prepare_input_response();
-        // Réponse basée sur: E0001E01010000000000010000000001CE00BB00FA00FF00FF00AF00F200FA003E
         integer idx = 0;
         logic [7:0] checksum = 0;
-                                                                        
-        rx_buffer[idx++] = 8'hE0;       // SYNC                         E0
-        rx_buffer[idx++] = 8'h00;       // SOURCE (master)              00
-        rx_buffer[idx++] = 8'h1E;       // LENGTH (30 bytes)            1E
-        rx_buffer[idx++] = 8'h01;       // STATUS (Report = 1)          01
+        logic       out1_requested = 0;
+        logic       anlout_requested = 0;
+        logic       scrpos_requested = 0;
+        // The request is still in rx_buffer (E0 node len cmd...): walk the chained commands
+        // before building the answer in the same buffer
+        begin
+            int p = 3;
+            int last = 2 + rx_buffer[2];        // index of the request checksum
+            while (p < last) begin
+                case (rx_buffer[p])
+                    8'h20: p += 3;              // SWINP players bytes
+                    8'h21: p += 2;              // COININP slots
+                    8'h22: p += 2;              // ANLINP channels
+                    8'h25: begin                // SCRPOSINP channel
+                        scrpos_requested = 1;
+                        scrpos_rx_frames++;
+                        p += 2;
+                    end
+                    8'h32: begin                // OUTPUT1 count data...
+                        out1_requested = 1;
+                        dout_rx_count = rx_buffer[p+1];
+                        for (int k = 0; k < 3; k++)
+                            dout_rx_data[k] = (k < rx_buffer[p+1]) ? rx_buffer[p+2+k] : 8'h00;
+                        dout_rx_frames++;
+                        p += 2 + rx_buffer[p+1];
+                    end
+                    8'h33: begin                // ANLOUT channels MSB LSB...
+                        anlout_requested = 1;
+                        aout_rx_count = rx_buffer[p+1];
+                        for (int k = 0; k < 8; k++)
+                            aout_rx_data[k] = (k < rx_buffer[p+1]) ? {rx_buffer[p+2+2*k], rx_buffer[p+3+2*k]} : 16'h0000;
+                        aout_rx_frames++;
+                        p += 2 + 2 * rx_buffer[p+1];
+                    end
+                    default: p = last;          // unknown command: stop
+                endcase
+            end
+        end
 
-        rx_buffer[idx++] = 8'h01;       // SWINP data start             01
-        rx_buffer[idx++] = 8'h00;       //                              00
-        rx_buffer[idx++] = 8'h00;       //                              00
-        rx_buffer[idx++] = 8'h00;       //                              00
-        rx_buffer[idx++] = 8'h00;       //                              00
-        rx_buffer[idx++] = 8'h00;       //                              00
-        rx_buffer[idx++] = 8'h01;       // COININP data start           01
-        rx_buffer[idx++] = 8'h00;       //                              00
-        rx_buffer[idx++] = 8'h00;       //                              00
-        rx_buffer[idx++] = 8'h00;       //                              00
-        rx_buffer[idx++] = 8'h00;       //                              00
-        rx_buffer[idx++] = 8'h01;       //                              01
-        rx_buffer[idx++] = 8'hCC;       // ANLINP data start            CC
-        rx_buffer[idx++] = 8'h00;
-        rx_buffer[idx++] = 8'hBA;
-        rx_buffer[idx++] = 8'h00;
-        rx_buffer[idx++] = 8'hFC;
-        rx_buffer[idx++] = 8'h00;
-        rx_buffer[idx++] = 8'hFF;
-        rx_buffer[idx++] = 8'h00;
-        rx_buffer[idx++] = 8'hFF;
-        rx_buffer[idx++] = 8'h00;
-        rx_buffer[idx++] = 8'hAB;
-        rx_buffer[idx++] = 8'h00;
-        rx_buffer[idx++] = 8'hF3;
-        rx_buffer[idx++] = 8'h00;
-        rx_buffer[idx++] = 8'hF9;
-        rx_buffer[idx++] = 8'h00;
-        rx_buffer[idx++] = 8'h39;
+        rx_buffer[idx++] = 8'hE0;       // SYNC
+        rx_buffer[idx++] = 8'h00;       // DESTINATION (master)
+        rx_buffer[idx++] = 8'h00;       // LENGTH (set below)
+        rx_buffer[idx++] = 8'h01;       // STATUS normal
+
+        // SWINP (20): REPORT, system byte, 2 players x 3 bytes
+        rx_buffer[idx++] = 8'h01;
+        rx_buffer[idx++] = EXP_SYS_SW;
+        rx_buffer[idx++] = EXP_P1_SW[15:8];
+        rx_buffer[idx++] = EXP_P1_SW[7:0];
+        rx_buffer[idx++] = EXP_P1_SW3;
+        rx_buffer[idx++] = EXP_P2_SW[15:8];
+        rx_buffer[idx++] = EXP_P2_SW[7:0];
+        rx_buffer[idx++] = EXP_P2_SW3;
+        // COININP (21): REPORT, 2 slots x 2 bytes
+        rx_buffer[idx++] = 8'h01;
+        for (int c = 0; c < 2; c++) begin
+            rx_buffer[idx++] = EXP_COIN[c][15:8];
+            rx_buffer[idx++] = EXP_COIN[c][7:0];
+        end
+        // ANLINP (22): REPORT, 8 channels x 2 bytes (MSB first)
+        rx_buffer[idx++] = 8'h01;
+        for (int c = 0; c < 8; c++) begin
+            rx_buffer[idx++] = EXP_ANALOG[c][15:8];
+            rx_buffer[idx++] = EXP_ANALOG[c][7:0];
+        end
+
+        // SCRPOSINP (25): REPORT, X MSB LSB, Y MSB LSB (sent by the controller after ANLINP)
+        if (scrpos_requested) begin
+            rx_buffer[idx++] = 8'h01;
+            rx_buffer[idx++] = EXP_SCR_X[15:8];
+            rx_buffer[idx++] = EXP_SCR_X[7:0];
+            rx_buffer[idx++] = EXP_SCR_Y[15:8];
+            rx_buffer[idx++] = EXP_SCR_Y[7:0];
+        end
+
+        // OUTPUT1 (32) then ANLOUT (33): REPORT only
+        if (out1_requested)
+            rx_buffer[idx++] = 8'h01;
+        if (anlout_requested)
+            rx_buffer[idx++] = 8'h01;
+
+        // LENGTH = STATUS + data + checksum, CHECKSUM = sum of all bytes after SYNC
+        rx_buffer[2] = idx - 3 + 1;
+        for (int i = 1; i < idx; i++) checksum += rx_buffer[i];
+        rx_buffer[idx++] = checksum;
 
         response_length = idx;
+        escape_response();
         $display("[SMART_JVS] Préparation réponse Input polling (%d bytes)", response_length);
     endfunction
 
@@ -587,7 +744,8 @@ module smart_jvs_device #(
 
                     8'h10: begin // CMD_IOIDENT - Device identification
                         $display("[SMART_JVS] -> Demande d'identification");
-                        prepare_device_id_response();
+                        if (NAMCO) prepare_namco_id_response();
+                        else       prepare_device_id_response();
                         need_response = 1;
                     end
 
@@ -613,6 +771,24 @@ module smart_jvs_device #(
                         $display("[SMART_JVS] -> Demande features");
                         prepare_feature_response();
                         need_response = 1;
+                    end
+
+                    8'h15: begin // CMD_MAINID - main board ID string (Namco boards only)
+                        string id = "";
+                        for (int i = 4; i < 2 + rx_buffer[2] && rx_buffer[i] != 8'h00; i++) id = {id, string'(rx_buffer[i])};
+                        mainid_rx_frames++;
+                        mainid_rx_ok = (id == EXP_MAINID) && (rx_buffer[2] == 8'd2 + EXP_MAINID.len() + 1);
+                        $display("[SMART_JVS] -> MAINID \"%s\"", id);
+                        prepare_report_response(1'b0, 8'h00);
+                        need_response = NAMCO;
+                    end
+
+                    8'h70: begin // Namco command 70 18 50 4C 14 40
+                        namco70_rx_frames++;
+                        namco70_rx_ok = (rx_buffer[2] == 8'h07) && (rx_buffer[4] == 8'h18) && (rx_buffer[5] == 8'h50) &&
+                                        (rx_buffer[6] == 8'h4C) && (rx_buffer[7] == 8'h14) && (rx_buffer[8] == 8'h40);
+                        prepare_report_response(1'b1, 8'h01);
+                        need_response = NAMCO;
                     end
 
                     8'h20: begin // CMD_SWINP - Switch inputs (multicommande)
@@ -644,8 +820,9 @@ module smart_jvs_device #(
             expected_frame_length <= 0;
             current_frame_length <= 0;
             new_frame_received <= 0;
-            device_address <= assigned_address;
-            need_response <= 0;
+            device_address = assigned_address;   // blocking, as in analyze_and_respond()
+            need_response = 0;
+            resp_req <= 0;
 
             // Clear buffers
             for (integer i = 0; i < 64; i++) begin
@@ -656,10 +833,20 @@ module smart_jvs_device #(
             new_frame_received <= 0; // Pulse
 
             // Traitement des bytes UART reçus
-            if (uart_rx_dv) begin
-                $display("[SMART_JVS] Byte reçu: 0x%02X - État: %s",
-                        uart_rx_byte, rx_state.name());
-                case (rx_state)
+            // JVS spec: a raw E0 (SYNC) always starts a new packet; D0 (MARK) + x stands
+            // for the data byte x + 1. Decoding happens before the byte count and the SUM
+            // processing, so rxb below is the decoded byte.
+            if (uart_rx_dv && uart_rx_byte == JVS_ESCAPE_BYTE && rx_state != RX_IDLE && !rx_mark) begin
+                rx_mark <= 1'b1;                                   // MARK: wait for the next byte
+            end else if (uart_rx_dv) begin
+                rxb = (uart_rx_byte == JVS_SYNC_BYTE) ? uart_rx_byte :
+                      rx_mark ? uart_rx_byte + 8'h01 : uart_rx_byte;
+                rx_mark <= 1'b0;
+                // SYNC: (re)start a packet whatever the current state
+                rx_state_eff = (uart_rx_byte == JVS_SYNC_BYTE) ? RX_IDLE : rx_state;
+                $display("[SMART_JVS] Byte reçu: 0x%02X (décodé 0x%02X) - État: %s",
+                        uart_rx_byte, rxb, rx_state_eff.name());
+                case (rx_state_eff)
                     //-----------------------------------------------------
                     // RX_IDLE - Wait for frame start (sync byte)
                     //-----------------------------------------------------
@@ -679,9 +866,9 @@ module smart_jvs_device #(
                     // RX_READ_ADDR - Read address byte (should be 0x00 for master)
                     //-----------------------------------------------------
                     RX_READ_ADDR: begin
-                        if (uart_rx_byte == JVS_BROADCAST_ADDR || uart_rx_byte == 8'h01) begin          // Valid master address
-                            rx_buffer_raw[rx_counter] <= uart_rx_byte;
-                            rx_checksum <= rx_checksum + uart_rx_byte; // Add to checksum
+                        if (rxb == JVS_BROADCAST_ADDR || rxb == 8'h01) begin          // Valid master address
+                            rx_buffer_raw[rx_counter] <= rxb;
+                            rx_checksum <= rx_checksum + rxb; // Add to checksum
                             rx_counter <= rx_counter + 1;
                             rx_state <= RX_READ_SIZE;
                         end else begin
@@ -694,9 +881,9 @@ module smart_jvs_device #(
                     // RX_READ_SIZE - Read frame length byte
                     //-----------------------------------------------------
                     RX_READ_SIZE: begin
-                        rx_buffer_raw[rx_counter] <= uart_rx_byte;
-                        rx_checksum <= rx_checksum + uart_rx_byte;
-                        rx_length <= uart_rx_byte;                // Store frame length
+                        rx_buffer_raw[rx_counter] <= rxb;
+                        rx_checksum <= rx_checksum + rxb;
+                        rx_length <= rxb;                // Store frame length
                         rx_counter <= rx_counter + 1;
                         rx_state <= RX_READ_DATA;
                     end
@@ -705,15 +892,15 @@ module smart_jvs_device #(
                     // RX_READ_DATA - Read data bytes and validate checksum
                     //-----------------------------------------------------
                     RX_READ_DATA: begin
-                        rx_buffer_raw[rx_counter] <= uart_rx_byte;
+                        rx_buffer_raw[rx_counter] <= rxb;
 
                         if (rx_counter < (JVS_OVERHEAD + rx_length)) begin
                             // Still reading data bytes
-                            rx_checksum <= rx_checksum + uart_rx_byte;
+                            rx_checksum <= rx_checksum + rxb;
                             rx_counter <= rx_counter + 1;
                         end else begin
                             // Last byte (checksum) received
-                            if (rx_checksum == uart_rx_byte) begin
+                            if (rx_checksum == rxb) begin
                                 rx_state <= RX_UNESCAPE;          // Checksum valid, start unescaping
                                 copy_read_idx <= 8'd0;            // Start reading from beginning
                                 copy_write_idx <= 8'd0;           // Start writing from beginning
@@ -740,8 +927,8 @@ module smart_jvs_device #(
                         copy_read_idx <= copy_read_idx + 1;
                         copy_write_idx <= copy_write_idx + 1;
                     end else if (copy_read_idx < (JVS_OVERHEAD + rx_length)) begin // In data section
-                        // Check for escape sequences in data section
-                        if (rx_buffer_raw[copy_read_idx] == JVS_ESCAPE_BYTE &&
+                        // Bytes are already decoded at reception (MARK handled on the fly)
+                        if (1'b0 && rx_buffer_raw[copy_read_idx] == JVS_ESCAPE_BYTE &&
                             copy_read_idx + 1 <= (JVS_OVERHEAD + rx_length) &&
                             (rx_buffer_raw[copy_read_idx + 1] == JVS_ESCAPED_E0 ||
                              rx_buffer_raw[copy_read_idx + 1] == JVS_ESCAPED_D0)) begin
@@ -783,7 +970,9 @@ module smart_jvs_device #(
 
                 // Analyser la commande et préparer la réponse
                 if (auto_respond) begin
+                    need_response = 0;
                     analyze_and_respond();
+                    if (need_response) resp_req <= ~resp_req;   // request the transmit block
                 end
 
                 // Signal frame completed
@@ -807,13 +996,15 @@ module smart_jvs_device #(
             response_index <= 0;
             response_sent <= 0;
             setup_time_counter <= 0;
+            resp_ack <= 0;
         end else begin
             response_sent <= 0; // Pulse
 
             case (tx_state)
                 TX_IDLE: begin
                     uart_tx_dv <= 0;
-                    if (need_response) begin
+                    if (resp_req != resp_ack) begin
+                        resp_ack <= resp_req;
                         response_index <= 0;
                         setup_time_counter <= 0;
                         tx_state <= TX_WAIT_SETUP;
@@ -861,7 +1052,6 @@ module smart_jvs_device #(
                 end
 
                 TX_COMPLETE: begin
-                    need_response <= 0;
                     response_sent <= 1;
                     tx_state <= TX_IDLE;
                     $display("[SMART_JVS] *** RÉPONSE TRANSMISE (%d bytes) ***", response_length);
